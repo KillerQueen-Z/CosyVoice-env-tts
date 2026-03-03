@@ -1,0 +1,295 @@
+\documentclass{article}
+\usepackage{iclr2025_conference,times}
+
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+
+\title{SoniSphere-LoRA: Instruction-Driven Environmental Speech Reconstruction}
+
+\author{ZHE CHEN/LINGYU YANG}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}}
+
+%\iclrfinalcopy
+
+\begin{document}
+
+\maketitle
+\begin{abstract}
+We propose SoniSphere, an instruction-driven framework for environmental speech reconstruction. Unlike conventional text-to-speech (TTS) systems that mainly pursue denoising and studio-clean output, our goal is to endow the model with an explicit understanding of physical space: given a natural language instruction (e.g., ``small room'', ``large hall''), the system should generate speech that reflects the corresponding reverberation and spatial characteristics. Building on CosyVoice3-0.5B as the base TTS backbone, we apply LoRA-based fine-tuning to inject environmental conditioning while keeping the core model frozen. Preliminary experiments on synthetic room-size data show that the model can follow coarse room-size instructions (small / medium / large) and produce perceptually consistent reverberation changes, suggesting the feasibility of parameter-efficient adaptation for instruction-driven environmental speech generation.
+\end{abstract}
+
+\section{Introduction}
+
+Modern text-to-speech (TTS) systems are typically trained to generate clean, studio-quality speech, and much effort is devoted to \emph{removing} background noise and reverberation. However, immersive applications such as virtual reality, gaming, and live streaming often require speech that is perceptually embedded within physical environments, where controlled reverberation and ambient noise are part of the desired output rather than artifacts to be suppressed.
+
+We investigate whether environmental acoustics can be controlled directly through natural language instructions. Given a command such as:
+
+\begin{quote}
+``Speak as if I am in a deep cave.''
+\end{quote}
+
+the system should generate speech that reflects both semantic correctness and acoustic spatial properties, such as reverberation time, early reflections, and perceived distance.
+
+To achieve this, we propose SoniSphere, which applies Low-Rank Adaptation (LoRA) on top of the open-source CosyVoice3-0.5B backbone to efficiently incorporate environmental conditioning without retraining the full model.
+
+\paragraph{Related Work.}
+Our work builds on a long line of neural TTS research. Early end-to-end systems conditioned waveform generators such as WaveNet on predicted acoustic features or mel spectrograms~\cite{shen2018natural,ping2019clarinet}, and explored high-quality multi-speaker and fast TTS at scale using architectures such as Deep Voice 3, FastSpeech, Transformer TTS, and FastSpeech 2~\cite{ping2017deepvoice3,ren2019fastspeech,li2019transformerTTS,ren2021fastspeech2}. More recently, neural codec language models and large TTS backbones have enabled zero-shot and instruction-driven speech generation, including models such as VALL-E, VALL-E 2, VALL-E R, Voicebox, MaskGCT, ELLA-V, VALL-T, RALL-E and related codec-based architectures~\cite{wang2023neuralcodecLM,kharitonov2023speakreadprompt,song2024ellav,du2024vallt,xin2024ralle,chen2024valle2,han2024valler,wang2024maskgct,meng2024autoregressiveNoVQ,wang2025sparktts,le2023voicebox}. In contrast to these works, which largely focus on content, speaker identity, and style, we explicitly target \emph{environmental} controllability: teaching a strong base TTS model to follow natural-language instructions about physical room properties and to synthesize speech with the corresponding reverberation characteristics.
+
+\section{Method}
+
+\begin{figure}[t]
+\centering
+% 请将整体流程图保存为 figures/pipeline.pdf 或 .png，并按需修改文件名
+\includegraphics[width=0.8\linewidth]{figures/pipeline}
+\caption{Overall SoniSphere-LoRA pipeline. Phase~1 synthesizes training pairs by combining clean speech with environmental RIRs and instruction prompts, and performs LoRA fine-tuning on the CosyVoice3-0.5B backbone. Phase~2 runs real-time inference, taking user text (and optional audio) plus environmental instructions to generate environment-matched speech.}
+\label{fig:pipeline}
+\end{figure}
+
+\subsection{Problem Formulation}
+
+Given text $T$ and environmental instruction $I$, the objective is to generate waveform:
+
+\[
+S = f(T, I)
+\]
+
+where $S$ preserves linguistic content while reflecting acoustic characteristics implied by $I$.
+
+\subsection{Baseline}
+
+We use CosyVoice3-0.5B as the base model:
+
+\begin{center}
+Text $\rightarrow$ Acoustic Model $\rightarrow$ Vocoder $\rightarrow$ Clean Speech
+\end{center}
+
+The baseline produces high-quality clean speech without environmental conditioning and is originally optimized for denoised, studio-like output. In our work, this backbone serves as a strong starting point to which we add environmental control via LoRA.
+
+\subsection{Base Model Selection and Comparison}
+
+Table~\ref{tab:tts_comparison} summarizes recent TTS systems that report word/character error rate and speaker similarity on standard Chinese and English evaluation sets. We focus on models that are either fully open-sourced or available via research-friendly licenses, and that fall within the 0.3--1.5B parameter range.
+
+\begin{table}[h]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lcccccccc}
+\toprule
+Model & Open & Size & \multicolumn{2}{c}{test-zh} & \multicolumn{2}{c}{test-en} & \multicolumn{2}{c}{test-hard} \\
+ & Source & (B) & CER $\downarrow$ & SS (\%) $\uparrow$ & WER $\downarrow$ & SS (\%) $\uparrow$ & CER $\downarrow$ & SS (\%) $\uparrow$ \\
+\midrule
+Human & - & - & 1.26 & 75.5 & 2.14 & 73.4 & - & - \\
+Seed-TTS & N & - & 1.12 & 79.6 & 2.25 & 76.2 & 7.59 & 77.6 \\
+MiniMax-Speech & N & - & 0.83 & 78.3 & 1.65 & 69.2 & - & - \\
+F5-TTS & Y & 0.3 & 1.52 & 74.1 & 2.00 & 64.7 & 8.67 & 71.3 \\
+Spark TTS & Y & 0.5 & 1.20 & 66.0 & 1.98 & 57.3 & - & - \\
+CosyVoice2 & Y & 0.5 & 1.45 & 75.7 & 2.57 & 65.9 & 6.83 & 72.4 \\
+FireRedTTS2 & Y & 1.5 & 1.14 & 73.2 & 1.95 & 66.5 & - & - \\
+Index-TTS2 & Y & 1.5 & 1.03 & 76.5 & 2.23 & 70.6 & 7.12 & 75.5 \\
+VibeVoice-1.5B & Y & 1.5 & 1.16 & 74.4 & 3.04 & 68.9 & - & - \\
+VibeVoice-Realtime & Y & 0.5 & - & - & 2.05 & 63.3 & - & - \\
+HiggsAudio-v2 & Y & 3.0 & 1.50 & 74.0 & 2.44 & 67.7 & - & - \\
+VoxCPM & Y & 0.5 & 0.93 & 77.2 & 1.85 & 72.9 & 8.87 & 73.0 \\
+GLM-TTS & Y & 1.5 & 1.03 & 76.1 & - & - & - & - \\
+GLM-TTS RL & Y & 1.5 & 0.89 & 76.4 & - & - & - & - \\
+Fun-CosyVoice3-0.5B-2512 & Y & 0.5 & 1.21 & 78.0 & 2.24 & 71.8 & 6.71 & 75.8 \\
+Fun-CosyVoice3-0.5B-2512\_RL & Y & 0.5 & 0.81 & 77.4 & 1.68 & 69.5 & - & - \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of recent TTS models in terms of recognition accuracy (CER/WER) and speaker similarity (SS). We adopt Fun-CosyVoice3-0.5B-2512 as the base backbone for our environmental adaptation.}
+\label{tab:tts_comparison}
+\end{table}
+
+We select Fun-CosyVoice3-0.5B-2512 as our base model for three main reasons. First, among open-source models around 0.5B parameters, it offers a strong balance between transcription accuracy and speaker similarity on both Chinese and English test sets, indicating robust baseline quality. Second, its 0.5B scale is small enough to allow LoRA fine-tuning on a single GPU while still being expressive enough to model subtle environmental effects. Third, CosyVoice3 is released with complete training and inference code, making it straightforward to integrate our env-instruct data pipeline and LoRA adaptation without reimplementing the core TTS architecture.
+
+\subsection{LoRA-Based Environmental Conditioning}
+
+We apply LoRA to transformer attention layers to enable parameter-efficient adaptation. Instruction embeddings are integrated with text representations to guide acoustic generation, while the majority of the CosyVoice parameters remain frozen.
+
+For the first data source (Source~A), environmental supervision is constructed explicitly through convolution with room impulse responses (RIRs). Given a clean waveform $S_{\text{clean}}$ and an RIR $h_{\text{RIR}}$ chosen according to a coarse room-size label (small / medium / large), we generate:
+\[
+S_{\text{env}} = S_{\text{clean}} * h_{\text{RIR}}.
+\]
+For each utterance we attach a natural-language instruction that describes the corresponding room size and reverberation strength. During fine-tuning, the model receives $(T, I)$ as input and is trained to reconstruct $S_{\text{env}}$, thereby learning how textual descriptions of room size map to specific reverberation patterns in the waveform.
+
+In addition, we consider a self-distillation strategy (Source~C, planned) to stabilize training when using larger or noisier corpora. A teacher model $f_{\text{T}}$ (for example, a stronger or earlier CosyVoice checkpoint) is first applied to clean speech and instructions to produce teacher waveforms or intermediate representations. We then apply the same RIR-based augmentation to the teacher outputs and train a student model $f_{\text{S}}$ with a combination of reconstruction loss and distillation loss:
+\[
+\mathcal{L} = \lambda_{\text{rec}} \, \| S_{\text{env}} - \hat{S}_{\text{env}} \|_1 + \lambda_{\text{distill}} \, \| f_{\text{T}}(T,I) - f_{\text{S}}(T,I) \|_2,
+\]
+where $\hat{S}_{\text{env}}$ is the student prediction. Intuitively, this two-stage process allows the student to first match a smoother teacher target before dealing with the full complexity of reverberation and noise, making optimization more stable when scaling up data.
+
+\section{Data and Evaluation Setup}
+
+\subsection{Speech Corpora}
+
+We use two publicly available English speech datasets for clean speech modeling:
+
+\textbf{LJSpeech} is a single-speaker dataset containing approximately 24 hours of read English speech sampled at 22.05 kHz. It provides high-quality, studio-recorded audio suitable for baseline TTS training.
+
+\textbf{VCTK} is a multi-speaker English corpus containing recordings from over 100 speakers with diverse accents. This dataset improves speaker diversity and robustness during adaptation.
+
+All speech data are resampled to 24 kHz to match the CosyVoice3 acoustic configuration.
+
+\subsection{Environmental Acoustic Data}
+
+To model environmental acoustics, we use Room Impulse Responses (RIRs) from two sources:
+
+\textbf{OpenAIR Impulse Response Library}, which contains real-world recordings of various acoustic spaces such as churches, halls, rooms, and underground spaces.
+
+\textbf{Simulated RIRs}, generated using standard room acoustic simulation techniques, allowing controlled variation of room size, reverberation time (RT60), and reflection patterns.
+
+These RIRs provide supervision for environmental conditioning.
+
+\subsection{Environmental Data Construction}
+
+Environmentally embedded speech targets are generated by convolving clean speech signals with corresponding RIRs:
+
+\[
+S_{\text{env}} = S_{\text{clean}} * h_{\text{RIR}}
+\]
+
+where $h_{\text{RIR}}$ represents the impulse response of a specific acoustic environment.
+
+Each training sample consists of:
+
+\begin{itemize}
+    \item Text transcript
+    \item Environmental instruction (e.g., ``deep cave'', ``large hall'')
+    \item Clean speech waveform
+    \item Convolved environmental speech waveform
+\end{itemize}
+
+\subsection{Data Processing and Sources}
+
+From the implementation side, our environmental supervision is organized into three complementary data streams. This section summarizes how each stream is constructed and how it is used in the project.
+
+\paragraph{Source A: Synthetic room-size supervision.}
+In the first stage, we fuse clean speech datasets with background/environmental datasets to build an \emph{env-instruct} corpus that explicitly encodes room size. Clean speech is taken from LibriTTS-style corpora, while environmental acoustics (reverberation and mild background noise) are generated using room impulse responses (RIRs) from OpenSLR 28 (RIRS\_NOISES). For each utterance we randomly sample one of several coarse room categories (e.g., \emph{small room}, \emph{medium room}, \emph{large room}, and \emph{clean}), apply the corresponding RIR, and attach a natural-language instruction describing the room size and reverberation strength. This synthetic pipeline is designed so that the model can directly learn the mapping from textual instructions about room size to the resulting reverberation pattern in the waveform.
+
+\paragraph{Source B: Real-world environmental recordings.}
+The second data source is a large family of real-scene speech corpora that contain recordings collected in complex acoustic environments. Concretely, we consider the \textbf{CHiME-3/4/5} series and the \textbf{VOiCES} (Voices Obscured in Complex Environmental Settings) corpus. CHiME provides noisy speech recorded in everyday scenarios such as \texttt{bus}, \texttt{cafe}, \texttt{street junction}, and \texttt{pedestrian area}, with annotations for speakers, channels, and (in some releases) parallel clean vs. noisy tracks. VOiCES focuses on room acoustics: clean speech is replayed and re-recorded in different rooms and microphone positions, with labels for room type, microphone location, and the presence of interfering sources (e.g., TV, music, background conversation). These datasets offer realistic mixtures of reverberation and noise that are difficult to simulate procedurally. We treat them as an additional supervision signal: for each scene configuration we design a corresponding instruction (for example, ``talking on a crowded bus'', ``speaking in a living room with TV noise'', ``speaking in a conference room with distant microphone''), and pair the recorded speech with these scene-level descriptions. This allows the model to see how high-level instructions relate to \emph{real} environmental acoustics beyond idealized room models.
+
+\paragraph{Source C: Distilled environmental supervision (planned).}
+In the third stage (planned work), we will introduce a knowledge-distillation based supervision stream. The idea is to first use a strong teacher model trained on the original clean and environmental data, then generate pseudo-labels or teacher predictions on additional clean speech. On top of these teacher outputs, we will further apply the same room-size reverberation augmentation as in Source~A. This produces a distilled dataset where the student model learns both from the teacher's acoustic behavior and from explicit room-size reverberation. Conceptually, this third stream combines the advantages of (i) large-scale teacher knowledge and (ii) controllable, instruction-aligned room acoustics.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lp{3cm}p{7cm}}
+\toprule
+ID & Type & Description \\
+\midrule
+A & Synthetic env-instruct &
+Clean speech convolved with simulated RIRs from OpenSLR 28, with coarse room-size instructions (small / medium / large room, clean). Implemented as our main room-size supervision pipeline. \\
+B & Real-scene corpora (CHiME / VOiCES) &
+Environmental speech recordings from CHiME-3/4/5 (bus, cafe, street junction, pedestrian area, etc.) and VOiCES (different rooms, microphone positions, and noise sources), paired with manually designed scene-level instructions. Implemented and being integrated into training. \\
+C & Distilled + reverb (teacher--student) &
+Teacher model predictions on clean speech, followed by room-size reverberation augmentation, used to train a student model with both distillation and instruction-aligned acoustics. Planned for future work. \\
+\bottomrule
+\end{tabular}
+\caption{Overview of the three data sources used (or planned) for environmental instruction supervision.}
+\end{table}
+
+\subsection{Dataset Summary}
+
+In our pilot experiments we construct a room-size env-instruct corpus from approximately 10{,}000 utterances for training and 1{,}000 utterances for validation. Each example consists of a text transcript, a clean waveform, an environmental instruction, and a corresponding reverberant waveform. For Source~A (synthetic room-size supervision), the instruction space is deliberately kept coarse and interpretable:
+
+\begin{itemize}
+    \item \textbf{Small room}: short reverberation time, dense early reflections, similar to a small office or bedroom.
+    \item \textbf{Medium room}: moderate reverberation, comparable to a classroom or meeting room.
+    \item \textbf{Large room}: longer reverberation tail, resembling a hall or auditorium.
+    \item \textbf{Clean}: no additional reverberation beyond the baseline CosyVoice3 model.
+\end{itemize}
+
+Representative instruction prompts include, for example, ``speak in a small room with light reverberation'', ``speak in a medium-sized room with moderate echo'', and ``speak in a large hall with strong reverberation''. For future extensions with Source~B (CHiME / VOiCES), we plan to introduce additional instruction categories that capture real-world acoustic scenes such as ``on a bus'', ``in a street junction'', ``in a cafeteria'', and ``in a living room with TV noise'', aligned with the scene labels provided by those corpora.
+
+\begin{figure}[t]
+\centering
+% 请将三种数据预处理示意图保存为 figures/data_sources.pdf 或 .png，并按需修改文件名
+\includegraphics[width=0.7\linewidth]{figures/data_sources}
+\caption{Overview of the three data processing streams. (A) Clean speech convolved with RIRs yields room-size env-instruct data. (B) Real recordings from CHiME / VOiCES paired with scene labels form real-scene env-instruct data. (C) Self-distillation combined with RIR augmentation yields a distilled env-instruct corpus for more stable large-scale training.}
+\label{fig:data_sources}
+\end{figure}
+
+\subsection{Preprocessing and Split}
+
+Preprocessing includes:
+
+\begin{itemize}
+    \item Resampling to 24 kHz
+    \item Loudness normalization
+    \item Silence trimming
+\end{itemize}
+
+The dataset is split into 80\% training, 10\% validation, and 10\% testing sets, with environmental categories balanced across splits.
+
+\subsection{Preprocessing}
+
+\begin{itemize}
+\item Resampling to 24 kHz
+\item Loudness normalization
+\item RIR convolution
+\item 80/10/10 train-dev-test split
+\end{itemize}
+
+\section{Experiments}
+
+\subsection{Training Setup}
+
+\begin{itemize}
+\item Base model: CosyVoice3-0.5B (LLM + flow + vocoder), initialized from the released checkpoint and kept mostly frozen.
+\item Adaptation: LoRA with rank 8 applied to transformer attention layers in the acoustic backbone.
+\item Optimizer: Adam with learning rate $1 \times 10^{-5}$ and a constant learning-rate schedule (no warmup in the current small-scale setting).
+\item Batching: dynamic batching with a maximum of 2\,000 acoustic frames per batch, using on-the-fly resampling and feature extraction as in the CosyVoice3 recipe.
+\item Hardware: single NVIDIA GPU with mixed-precision training (\texttt{--use\_amp}), using 2 data-loading workers and a prefetch size of 100.
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+
+We evaluate environmental modeling from two complementary perspectives. First, for each model checkpoint we synthesize the validation set by feeding the same $(T, I)$ pairs as in the room-size env-instruct corpus, and compute frame-aligned spectral distances between the generated waveforms and the corresponding reference waveforms (MCD, log-spectral distance), as well as intelligibility-oriented scores such as STOI and PESQ. Second, to directly measure whether the model has learned the intended room-size semantics, we estimate the reverberation time (RT60) of both generated and reference signals and report the average absolute RT60 error per instruction category (small / medium / large). In addition, we conduct small-scale listening tests in which subjects are asked to identify the perceived room size and to rate overall speech quality, providing a subjective complement to the objective metrics.
+
+\section{Current Results}
+
+At the current stage, we have successfully migrated our system to the CosyVoice3-0.5B backbone and validated the end-to-end instruction-driven generation pipeline. The room-size env-instruct data (Source~A) has been generated and inspected: listening tests confirm that the ``small / medium / large room'' instructions produce perceptually distinct reverberation levels while preserving intelligibility.
+
+We have completed an initial LoRA fine-tuning run on a relatively small-scale subset of the room-size corpus due to limited compute. While the environmental controllability is not yet consistently strong across all prompts (suggesting that larger-scale training is needed), we observe that the model largely retains the base model's core speech generation quality: intelligibility and speaker characteristics do not noticeably degrade compared to the unadapted CosyVoice3 baseline. In the next stage, we will scale up the training set (and integrate Source~B and Source~C) to improve environmental fidelity while preserving the underlying synthesis capability.
+
+
+\section{Current Status and Next Steps}
+
+\textbf{Completed:}
+\begin{itemize}
+\item Implementation of the env-instruct data pipeline for coarse room sizes (Source~A), including convolution with RIRs and natural-language instruction generation.
+\item Migration to the CosyVoice3-0.5B backbone and integration of LoRA-based environmental conditioning.
+\item End-to-end training workflow from data generation to LoRA fine-tuning on the room-size env-instruct dataset.
+\end{itemize}
+
+\textbf{Ongoing:}
+\begin{itemize}
+\item Continued environmental fine-tuning on Source~A under limited GPU resources.
+\item Structured evaluation of environmental controllability (objective metrics and listening tests).
+\item Data curation and preprocessing for real-scene corpora (CHiME / VOiCES) to instantiate Source~B.
+\end{itemize}
+
+\textbf{Next Steps:}
+\begin{itemize}
+\item Implement and evaluate the self-distillation based data stream (Source~C) to make training on larger, noisier corpora more stable.
+\item Scale up training to larger subsets of CHiME and VOiCES, and conduct ablation studies on the contribution of each data source (A/B/C).
+\item Refine the evaluation protocol (including room-size discrimination tasks and spatial realism ratings) and optimize inference latency for interactive demos.
+\end{itemize}
+
+\section{Conclusion}
+
+We present SoniSphere, a LoRA-adapted instruction-driven environmental speech generation framework. Preliminary experiments suggest the feasibility of natural language-controlled acoustic scene reconstruction. Ongoing work focuses on improving realism and enabling real-time deployment.
+
+\bibliography{iclr2025_conference}
+\bibliographystyle{iclr2025_conference}
+
+\end{document}
