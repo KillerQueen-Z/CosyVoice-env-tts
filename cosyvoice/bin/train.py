@@ -21,7 +21,10 @@ from copy import deepcopy
 import os
 import torch
 import torch.distributed as dist
-import deepspeed
+try:
+    import deepspeed
+except ImportError:
+    deepspeed = None  # 未安装时仅支持 torch_ddp
 
 from hyperpyyaml import load_hyperpyyaml
 
@@ -89,7 +92,8 @@ def get_args():
                         default=60,
                         type=int,
                         help='timeout (in seconds) of cosyvoice_join.')
-    parser = deepspeed.add_config_arguments(parser)
+    if deepspeed is not None:
+        parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
     return args
 

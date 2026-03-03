@@ -50,3 +50,7 @@ pretrained_models/*
 *_pb2_grpc.py
 *_pb2.py
 *.tar
+
+# env_instruct_pipeline: 生成的数据与下载的数据集不推送
+env_instruct_pipeline/output/
+env_instruct_pipeline/datasets/

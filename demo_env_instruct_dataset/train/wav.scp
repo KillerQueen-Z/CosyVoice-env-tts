@@ -1,0 +1,4 @@
+train_0000_room /Users/andy/Desktop/vscode/CosyVoice/demo_env_instruct_dataset/train/wavs/train_0000_room.wav
+train_0001_street /Users/andy/Desktop/vscode/CosyVoice/demo_env_instruct_dataset/train/wavs/train_0001_street.wav
+train_0002_cave /Users/andy/Desktop/vscode/CosyVoice/demo_env_instruct_dataset/train/wavs/train_0002_cave.wav
+train_0003_clean /Users/andy/Desktop/vscode/CosyVoice/demo_env_instruct_dataset/train/wavs/train_0003_clean.wav

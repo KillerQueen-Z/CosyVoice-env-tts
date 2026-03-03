@@ -1,0 +1,4 @@
+train_0000_room spk_demo
+train_0001_street spk_demo
+train_0002_cave spk_demo
+train_0003_clean spk_demo
