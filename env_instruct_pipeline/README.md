@@ -2,6 +2,8 @@
 
 用于 CosyVoice「人声 + 环境音」instruct 微调：下载数据集、生成 Kaldi 格式、再转为 parquet 训练数据。
 
+**云上运行**：在带 NVIDIA GPU 的云服务器上从零跑数据生成 + 训练，见 [docs/DEPLOY_CLOUD.md](docs/DEPLOY_CLOUD.md)。
+
 ## 目录说明
 
 ```
