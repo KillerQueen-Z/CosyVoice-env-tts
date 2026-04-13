@@ -1,503 +1,209 @@
-# SoniSphere-LoRA (CosyVoice-based Environmental TTS)
+# SoniSphere-LoRA（基于 CosyVoice 的环境感知 TTS）
 
-This repository is a project-oriented fork of **CosyVoice3-0.5B** for studying **instruction-driven environmental speech reconstruction**. Conventional TTS systems typically aim to *remove* noise and reverberation and produce studio-clean speech. In contrast, this project teaches a TTS model to **understand physical space and acoustic environments**—e.g., given an instruction like *“small room”* or *“large hall”*, generate speech with the corresponding reverberation characteristics.
+本仓库是在 **CosyVoice3-0.5B** 上的课题向 fork，研究 **指令驱动的环境语音重建**：给定如「小房间」「大厅」等自然语言指令，合成带对应混响特征的语音（与「去混响、做干声」的传统 TTS 目标不同）。
 
-Core ideas:
-- **Base model**: CosyVoice3-0.5B (LLM + flow + vocoder)
-- **Adaptation**: LoRA fine-tuning (parameter-efficient; aims to preserve base synthesis quality)
-- **Supervision**: env-instruct data (clean speech + RIR convolution + natural-language instructions), with planned extensions to real-scene corpora and self-distillation
+**核心**：CosyVoice3-0.5B（LLM + flow + vocoder）→ **LoRA 微调** → 监督来自 **env-instruct**（干声 + RIR + 文本指令），并计划扩展真实场景语料与自蒸馏。
 
-The original upstream CosyVoice README is preserved as **`README_raw.md`**.
+上游 CosyVoice 的完整安装、演示、评测与引用说明保留在 **`README_raw.md`**。
 
 ---
 
-## Repository layout (project-relevant)
+## 仓库结构（与本课题相关）
 
-- `env_instruct_pipeline/`: dataset pipeline (download datasets, synthesize env-instruct, parquet export)
-- `tools/build_env_instruct_dataset.py`: env-instruct generator (supports coarse room-size mode)
-- `env_instruct_pipeline/scripts/run_room_100.sh`: quick generation of room-size data (small/medium/large/clean)
-- `env_instruct_pipeline/scripts/run_train_room.sh`: GPU training entry (llm → flow → hifigan)
-- `env_instruct_pipeline/scripts/make_instruct_audio_list.py`: export `(wav, text, instruct)` JSON for inspection
-- `env_instruct_pipeline/docs/DEPLOY_CLOUD.md`: cloud setup guide (Linux + NVIDIA GPU)
-- `report.tex`: project report (paper-style)
+| 路径 | 说明 |
+|------|------|
+| `quick_init.sh` | **新环境一键初始化**：依赖安装、数据下载、Kaldi 列表、CosyVoice3 预训练下载 |
+| `env_instruct_pipeline/` | 数据流水线：下载、合成 env-instruct、导出 parquet |
+| `tools/build_env_instruct_dataset.py` | 带环境与 instruct 的数据合成 |
+| `env_instruct_pipeline/scripts/download_datasets.sh` | OpenSLR28（RIR）+ LibriTTS |
+| `env_instruct_pipeline/scripts/run_room_100.sh` | 小规模试跑（约 100 train / 20 dev） |
+| `env_instruct_pipeline/scripts/run_room_5000.sh` | 较大训练集（默认 5000 train / 500 dev） |
+| `env_instruct_pipeline/scripts/run_train_room.sh` | **GPU 训练入口**（可含 parquet 生成 + llm→flow→hifigan） |
+| `env_instruct_pipeline/docs/DEPLOY_CLOUD.md` | 云上 Linux + NVIDIA 从零部署 |
+| `report.tex` | 课题报告（论文体例） |
 
-> Note: `env_instruct_pipeline/datasets/` and `env_instruct_pipeline/output/` can be large and are intentionally **git-ignored**.
+> **`env_instruct_pipeline/datasets/`**、**`env_instruct_pipeline/output/`**、**`pretrained_models/`**、**`exp/`** 等体积大，已 **gitignore**，换机器需重新下载或自行拷贝。
 
 ---
 
-## Quick Start
+## 新环境快速启动
 
-This quick start uses the **coarse room-size / reverberation** setting: `clean`, `small_room`, `medium_room`, `large_room`.
+以下均在 **仓库根目录** 执行。训练需 **Linux + NVIDIA GPU**；仅做数据准备可在 macOS 上完成大部分步骤（合成较慢）。
 
-### 0) Environment
+### 0. 系统与工具
 
-Recommended: Python 3.10 + conda.
+- **Python ≥ 3.10**（推荐 Conda）
+- 训练机安装较新的 **NVIDIA 驱动**（与 `requirements.txt` 中 **CUDA 12.1** 版 PyTorch 匹配）
+- 建议安装 **sox**（部分音频处理会用到）：
 
 ```bash
+# Ubuntu / Debian
+sudo apt-get update && sudo apt-get install -y sox libsox-dev
+```
+
+### 1. 克隆与 Conda 环境
+
+```bash
+git clone <你的仓库 HTTPS 或 SSH 地址>
+cd CosyVoice-env-tts
+
 conda create -n cosyvoice python=3.10 -y
 conda activate cosyvoice
-pip install -r requirements.txt
 ```
 
-> Training requires **Linux + NVIDIA GPU (CUDA)**. macOS is fine for data generation/inspection, but not for training.
+### 2. 一键初始化（推荐）
 
-### 1) Generate coarse room-size data (local)
-
-From the repo root:
+在已激活的 Conda 环境中执行：
 
 ```bash
-bash env_instruct_pipeline/scripts/run_room_100.sh
+bash quick_init.sh
 ```
 
-Default output:
-- `env_instruct_pipeline/output/env_instruct_room100/`
+脚本会依次完成：
 
-This dataset contains 4 instruction classes: `clean / small_room / medium_room / large_room` (no `street`).
+1. `pip install -r requirements.txt`（可用国内镜像，见下）
+2. `bash env_instruct_pipeline/scripts/download_datasets.sh`（RIR + LibriTTS `dev-clean`）
+3. `prepare_kaldi_libritts.py`（自动识别 `LibriTTS/` 或 `LibriTTS/LibriTTS/` 解压结构）
+4. `download_pretrained_cosyvoice3.py`（默认 **ModelScope**；海外见下）
 
-### 2) Export an inspection JSON (instruct ↔ wav ↔ text)
+**常用环境变量**（均为可选）：
+
+```bash
+# 国内 pip 镜像示例
+export PIP_EXTRA_ARGS='-i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com'
+
+# 海外下载预训练改为 Hugging Face
+export PRETRAINED_BACKEND=huggingface
+
+# 预训练保存路径（默认仓库内 pretrained_models/Fun-CosyVoice3-0.5B）
+export PRETRAINED_DIR=/你的大盘路径/pretrained_models/Fun-CosyVoice3-0.5B
+
+# 若某步已做过，可跳过
+export SKIP_PIP=1          # 跳过 pip
+export SKIP_DATA=1       # 跳过数据下载
+export SKIP_KALDI=1      # 跳过 Kaldi 准备
+export SKIP_PRETRAINED=1 # 跳过预训练下载
+```
+
+### 3. 手动初始化（与一键等价，便于排查）
+
+```bash
+pip install -r requirements.txt
+
+bash env_instruct_pipeline/scripts/download_datasets.sh
+
+# LibriTTS 解压后多为 datasets/speech/LibriTTS/LibriTTS/，请按实际目录二选一：
+python env_instruct_pipeline/scripts/prepare_kaldi_libritts.py \
+  --src_dir env_instruct_pipeline/datasets/speech/LibriTTS/LibriTTS \
+  --des_dir env_instruct_pipeline/datasets/speech/kaldi
+
+python env_instruct_pipeline/scripts/download_pretrained_cosyvoice3.py \
+  --backend modelscope \
+  --out_dir pretrained_models/Fun-CosyVoice3-0.5B
+```
+
+更细说明见 **`env_instruct_pipeline/README.md`**。
+
+### 4. 数据处理：生成 env-instruct 训练数据
+
+在已有 **Kaldi 人声** 与 **RIRS_NOISES** 的前提下，从仓库根目录执行其一：
+
+```bash
+# 小规模试跑（输出约百级 utterances）
+bash env_instruct_pipeline/scripts/run_room_100.sh
+
+# 或较大规模（默认 5000 train / 500 dev）
+bash env_instruct_pipeline/scripts/run_room_5000.sh
+```
+
+默认输出目录：
+
+- 试跑：`env_instruct_pipeline/output/env_instruct_room100/`
+- 5000 档：`env_instruct_pipeline/output/env_instruct_room5000/`
+
+指令类别（粗粒度 room）：`clean`、`small_room`、`medium_room`、`large_room`。
+
+**可选**：导出检查用 JSON（wav / 文本 / instruct 对照）：
 
 ```bash
 python env_instruct_pipeline/scripts/make_instruct_audio_list.py \
   --src_dir env_instruct_pipeline/output/env_instruct_room100/train
 ```
 
-Output:
-- `env_instruct_pipeline/output/env_instruct_room100/train/instruct_audio_list.json`
+### 5. 训练 CosyVoice3（基座 + LoRA 流程）
 
-### 3) (Optional) Export parquet + `*.data.list`
+1. 设置环境变量（路径按你本机修改）：
 
 ```bash
-OUT=env_instruct_pipeline/output/env_instruct_room100
-mkdir -p $OUT/train/parquet $OUT/dev/parquet
-python tools/make_parquet_list.py --num_utts_per_parquet 100 --num_processes 2 --src_dir $OUT/train --des_dir $OUT/train/parquet
-python tools/make_parquet_list.py --num_utts_per_parquet 50  --num_processes 1 --src_dir $OUT/dev   --des_dir $OUT/dev/parquet
-cat $OUT/train/parquet/data.list > $OUT/train.data.list
-cat $OUT/dev/parquet/data.list   > $OUT/dev.data.list
+export PYTHONPATH="$(pwd):${PYTHONPATH}"
+export PRETRAINED_DIR="${PRETRAINED_DIR:-$(pwd)/pretrained_models/Fun-CosyVoice3-0.5B}"
 ```
 
----
-
-## GPU Training (recommended)
-
-Training depends on CUDA. Run on Linux + NVIDIA GPU. See `env_instruct_pipeline/docs/DEPLOY_CLOUD.md` for a full walkthrough.
-
-Minimal path:
-
-1) Download CosyVoice3 pretrained model (choose one backend):
+2. **数据目录**：`run_train_room.sh` 默认使用 **`env_instruct_pipeline/output/env_instruct_room100`**。若你用的是 `run_room_5000.sh`，必须指定：
 
 ```bash
-# Mainland China
-python env_instruct_pipeline/scripts/download_pretrained_cosyvoice3.py --backend modelscope
-
-# Overseas
-# python env_instruct_pipeline/scripts/download_pretrained_cosyvoice3.py --backend huggingface
+export DATA_ROOT=env_instruct_pipeline/output/env_instruct_room5000
 ```
 
-2) Train (llm → flow → hifigan):
+3. 启动训练（内部顺序：**Stage 0** 生成 parquet 与 `*.data.list` → **Stage 5** 训练 llm / flow / hifigan）：
 
 ```bash
-export PRETRAINED_DIR=pretrained_models/Fun-CosyVoice3-0.5B
 bash env_instruct_pipeline/scripts/run_train_room.sh
 ```
 
-Artifacts are written to:
-- `exp/env_instruct_room/`
-- `tensorboard/env_instruct_room/`
-
----
-
-## Data sources (three streams)
-
-- **A (implemented)** Synthetic room-size env-instruct: clean speech + OpenSLR28 (RIRS_NOISES) RIR convolution → supervision via room-size instructions.
-- **B (planned / integrating)** Real-scene corpora: CHiME-3/4/5 + VOiCES → map scene/room/mic labels to instructions.
-- **C (planned)** Self-distillation + augmentation: teacher produces smoother targets, then apply RIR/noise; student learns more stably at scale.
-
----
-
-## FAQ
-
-- **Why do references show long URLs with awkward line breaks?** The ICLR LaTeX template + `hyperref/url` automatically breaks long URLs; this is expected.
-- **CUDA errors during training?** Use Linux + NVIDIA GPU and ensure CUDA-enabled PyTorch is installed.
-
-# SoniSphere-LoRA (CosyVoice-based Environmental TTS)
-
-This repository is a project-oriented fork of **CosyVoice3-0.5B** for studying **instruction-driven environmental speech reconstruction**. Conventional TTS systems aim to *remove* noise and reverberation and produce studio-clean speech. In contrast, this project teaches a TTS model to **understand physical space and acoustic environments**—e.g., given an instruction like *“small room”* or *“large hall”*, generate speech with the corresponding reverberation characteristics.
-
-Core ideas:
-- **Base model**: CosyVoice3-0.5B (LLM + flow + vocoder)
-- **Adaptation**: LoRA fine-tuning (parameter-efficient; aims to preserve base synthesis quality)
-- **Supervision**: env-instruct data (clean speech + RIR convolution + natural-language instructions), with planned extensions to real-scene corpora and self-distillation
-
-> The original upstream CosyVoice README is preserved as `README_raw.md`.
-
----
-
-## Repository layout (project-relevant)
-
-- `env_instruct_pipeline/`: dataset pipeline (download datasets, synthesize env-instruct, parquet export)
-- `tools/build_env_instruct_dataset.py`: env-instruct generator (supports coarse room-size mode)
-- `env_instruct_pipeline/scripts/run_room_100.sh`: quick generation of room-size data (small/medium/large/clean)
-- `env_instruct_pipeline/scripts/run_train_room.sh`: GPU training entry (llm → flow → hifigan)
-- `env_instruct_pipeline/scripts/make_instruct_audio_list.py`: export `(wav, text, instruct)` JSON for inspection
-- `env_instruct_pipeline/docs/DEPLOY_CLOUD.md`: cloud setup guide (Linux + NVIDIA GPU)
-- `report.tex`: project report (paper-style)
-
----
-
-## Quick Start
-
-This quick start uses the **coarse room-size / reverberation** setting: `clean`, `small_room`, `medium_room`, `large_room`.
-
-### 0) Environment
-
-Recommended: Python 3.10 + conda.
+**仅重新跑训练、不重建 parquet** 时：
 
 ```bash
-conda create -n cosyvoice python=3.10 -y
-conda activate cosyvoice
-pip install -r requirements.txt
-```
-
-> Training requires **Linux + NVIDIA GPU (CUDA)**. macOS is fine for data generation/inspection, but not for training.
-
-### 1) Generate coarse room-size data (local)
-
-From the repo root:
-
-```bash
-bash env_instruct_pipeline/scripts/run_room_100.sh
-```
-
-Default output:
-- `env_instruct_pipeline/output/env_instruct_room100/`
-
-This dataset contains 4 instruction classes: `clean / small_room / medium_room / large_room` (no `street`).
-
-### 2) Export an inspection JSON (instruct ↔ wav ↔ text)
-
-```bash
-python env_instruct_pipeline/scripts/make_instruct_audio_list.py \
-  --src_dir env_instruct_pipeline/output/env_instruct_room100/train
-```
-
-输出：
-- `env_instruct_pipeline/output/env_instruct_room100/train/instruct_audio_list.json`
-
-### 3)（可选）生成 parquet + data.list
-
-```bash
-OUT=env_instruct_pipeline/output/env_instruct_room100
-mkdir -p $OUT/train/parquet $OUT/dev/parquet
-python tools/make_parquet_list.py --num_utts_per_parquet 100 --num_processes 2 --src_dir $OUT/train --des_dir $OUT/train/parquet
-python tools/make_parquet_list.py --num_utts_per_parquet 50  --num_processes 1 --src_dir $OUT/dev   --des_dir $OUT/dev/parquet
-cat $OUT/train/parquet/data.list > $OUT/train.data.list
-cat $OUT/dev/parquet/data.list   > $OUT/dev.data.list
-```
-
----
-
-## 云上 GPU 训练（推荐）
-
-训练依赖 CUDA，请在 Linux + NVIDIA GPU 上运行。完整流程见 `env_instruct_pipeline/docs/DEPLOY_CLOUD.md`。
-
-最短路径：
-
-1) 下载 CosyVoice3 预训练模型（二选一）：
-
-```bash
-# 国内
-python env_instruct_pipeline/scripts/download_pretrained_cosyvoice3.py --backend modelscope
-# 海外
-# python env_instruct_pipeline/scripts/download_pretrained_cosyvoice3.py --backend huggingface
-```
-
-2) 开始训练（llm → flow → hifigan）：
-
-```bash
-export PRETRAINED_DIR=pretrained_models/Fun-CosyVoice3-0.5B
+export stage=5
+export stop_stage=5
 bash env_instruct_pipeline/scripts/run_train_room.sh
 ```
 
-训练产物默认在：
-- `exp/env_instruct_room/`
-- `tensorboard/env_instruct_room/`
+**训练产物**（默认）：
+
+- 检查点与日志：`exp/env_instruct_room/`
+- TensorBoard：`tensorboard/env_instruct_room/`
+
+**Git 远程**：若使用 SSH，请将 `origin` 设为 `git@github.com:用户名/仓库名.git`；首次连接需信任主机键（见 `ssh-keyscan github.com >> ~/.ssh/known_hosts`）。勿将 **miniconda 安装包、训练日志、本机预训练目录的符号链接** 提交到仓库（已写入 `.gitignore`）。
 
 ---
 
-## 数据来源（三条线）
+## 数据与产物路径速查
 
-- **A（已实现）合成 room-size env-instruct**：干净语音 + OpenSLR28 (RIRS_NOISES) 的 RIR 卷积 → small/medium/large/clean 指令监督。
-- **B（计划/集成中）真实场景语料**：CHiME-3/4/5 + VOiCES → 场景/房间/麦位标签映射为指令。
-- **C（计划）自蒸馏 + 增强**：teacher 生成更平滑目标，再加 RIR/噪声 → student 更稳定地学习环境可控性。
+| 内容 | 路径 |
+|------|------|
+| 下载的 RIR / LibriTTS | `env_instruct_pipeline/datasets/` |
+| Kaldi 格式人声 | `env_instruct_pipeline/datasets/speech/kaldi/` |
+| 合成后的 env-instruct（wav、scp、instruct 等） | `env_instruct_pipeline/output/<你的 OUT 目录>/` |
+| Parquet 与 `train.data.list` / `dev.data.list` | 同上目录下 `train/parquet/`、`dev/parquet/` 及根级 `*.data.list` |
+| CosyVoice3 预训练 | `PRETRAINED_DIR` 指向的目录（需含 `llm.pt`、`flow.pt`、`hifigan.pt` 等） |
+
+---
+
+## 云端与延伸阅读
+
+- 从零在云 GPU 上跑通：**`env_instruct_pipeline/docs/DEPLOY_CLOUD.md`**
+- 流水线逐步说明（中文）：**`env_instruct_pipeline/README.md`**
+- CosyVoice 原版 WebUI、vLLM、Docker、评测表等：**`README_raw.md`**
 
 ---
 
 ## 常见问题
 
-- **Reference 里 URL 断行看着“乱”**：ICLR 模板 + `hyperref/url` 对长链接自动断行，是正常现象。
-- **训练报 CUDA 相关错误**：请在 Linux + NVIDIA GPU 环境运行训练脚本。
+- **换机器只有 `git clone` 不够**：需重装依赖、重新下载或拷贝 `datasets/`、`output/`、`pretrained_models/`，并重新设置 `PYTHONPATH`、`PRETRAINED_DIR`、`DATA_ROOT`。
+- **推送 GitHub 失败且提示大文件**：单文件不能超过 100MB；不要将 `miniconda.sh`、整包数据或日志提交进 Git。
+- **训练报 CUDA 错误**：确认在 Linux + NVIDIA 上安装的是 **CUDA 版 PyTorch**（与 `requirements.txt` 中索引一致）。
 
-![SVG Banners](https://svg-banners.vercel.app/api?type=origin&text1=CosyVoice🤠&text2=Text-to-Speech%20💖%20Large%20Language%20Model&width=800&height=210)
+---
 
-## 👉🏻 CosyVoice 👈🏻
+## 数据来源（课题三条线）
 
-**Fun-CosyVoice 3.0**: [Demos](https://funaudiollm.github.io/cosyvoice3/); [Paper](https://arxiv.org/pdf/2505.17589); [Modelscope](https://www.modelscope.cn/models/FunAudioLLM/Fun-CosyVoice3-0.5B-2512); [Huggingface](https://huggingface.co/FunAudioLLM/Fun-CosyVoice3-0.5B-2512); [CV3-Eval](https://github.com/FunAudioLLM/CV3-Eval)
+- **A（已实现）**：合成 room-size env-instruct（干声 + OpenSLR28 RIR + 指令）。
+- **B（计划）**：真实场景语料（CHiME、VOiCES 等）映射为指令。
+- **C（计划）**：自蒸馏与增强，稳定扩大规模。
 
-**CosyVoice 2.0**: [Demos](https://funaudiollm.github.io/cosyvoice2/); [Paper](https://arxiv.org/pdf/2412.10117); [Modelscope](https://www.modelscope.cn/models/iic/CosyVoice2-0.5B); [HuggingFace](https://huggingface.co/FunAudioLLM/CosyVoice2-0.5B)
+---
 
-**CosyVoice 1.0**: [Demos](https://fun-audio-llm.github.io); [Paper](https://funaudiollm.github.io/pdf/CosyVoice_v1.pdf); [Modelscope](https://www.modelscope.cn/models/iic/CosyVoice-300M); [HuggingFace](https://huggingface.co/FunAudioLLM/CosyVoice-300M)
+## 上游致谢与引用
 
-## Highlight🔥
-
-**Fun-CosyVoice 3.0** is an advanced text-to-speech (TTS) system based on large language models (LLM), surpassing its predecessor (CosyVoice 2.0) in content consistency, speaker similarity, and prosody naturalness. It is designed for zero-shot multilingual speech synthesis in the wild.
-### Key Features
-- **Language Coverage**: Covers 9 common languages (Chinese, English, Japanese, Korean, German, Spanish, French, Italian, Russian), 18+ Chinese dialects/accents (Guangdong, Minnan, Sichuan, Dongbei, Shan3xi, Shan1xi, Shanghai, Tianjin, Shandong, Ningxia, Gansu, etc.) and meanwhile supports both multi-lingual/cross-lingual zero-shot voice cloning.
-- **Content Consistency & Naturalness**: Achieves state-of-the-art performance in content consistency, speaker similarity, and prosody naturalness.
-- **Pronunciation Inpainting**: Supports pronunciation inpainting of Chinese Pinyin and English CMU phonemes, providing more controllability and thus suitable for production use.
-- **Text Normalization**: Supports reading of numbers, special symbols and various text formats without a traditional frontend module.
-- **Bi-Streaming**: Support both text-in streaming and audio-out streaming, and achieves latency as low as 150ms while maintaining high-quality audio output.
-- **Instruct Support**: Supports various instructions such as languages, dialects, emotions, speed, volume, etc.
-
-
-## Roadmap
-
-- [x] 2025/12
-
-    - [x] release Fun-CosyVoice3-0.5B-2512 base model, rl model and its training/inference script
-    - [x] release Fun-CosyVoice3-0.5B modelscope gradio space
-
-- [x] 2025/08
-
-    - [x] Thanks to the contribution from NVIDIA Yuekai Zhang, add triton trtllm runtime support and cosyvoice2 grpo training support
-
-- [x] 2025/07
-
-    - [x] release Fun-CosyVoice 3.0 eval set
-
-- [x] 2025/05
-
-    - [x] add CosyVoice2-0.5B vllm support
-
-- [x] 2024/12
-
-    - [x] 25hz CosyVoice2-0.5B released
-
-- [x] 2024/09
-
-    - [x] 25hz CosyVoice-300M base model
-    - [x] 25hz CosyVoice-300M voice conversion function
-
-- [x] 2024/08
-
-    - [x] Repetition Aware Sampling(RAS) inference for llm stability
-    - [x] Streaming inference mode support, including kv cache and sdpa for rtf optimization
-
-- [x] 2024/07
-
-    - [x] Flow matching training support
-    - [x] WeTextProcessing support when ttsfrd is not available
-    - [x] Fastapi server and client
-
-## Evaluation
-
-| Model | Open-Source | Model Size | test-zh<br>CER (%) ↓ | test-zh<br>SS (%) ↑ | test-en<br>WER (%) ↓ | test-en<br>SS (%) ↑ | test-hard<br>CER (%) ↓ | test-hard<br>SS (%) ↑ |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Human | - | - | 1.26 | 75.5 | 2.14 | 73.4 | - | - |
-| Seed-TTS | ❌ | - | 1.12 | 79.6 | 2.25 | 76.2 | 7.59 | 77.6 |
-| MiniMax-Speech | ❌ | - | 0.83 | 78.3 | 1.65 | 69.2 | - | - |
-| F5-TTS | ✅ | 0.3B | 1.52 | 74.1 | 2.00 | 64.7 | 8.67 | 71.3 |
-| Spark TTS | ✅ | 0.5B | 1.2 | 66.0 | 1.98 | 57.3 | - | - |
-| CosyVoice2 | ✅ | 0.5B | 1.45 | 75.7 | 2.57 | 65.9 | 6.83 | 72.4 |
-| FireRedTTS2 | ✅ | 1.5B | 1.14 | 73.2 | 1.95 | 66.5 | - | - |
-| Index-TTS2 | ✅ | 1.5B | 1.03 | 76.5 | 2.23 | 70.6 | 7.12 | 75.5 |
-| VibeVoice-1.5B | ✅ | 1.5B | 1.16 | 74.4 | 3.04 | 68.9 | - | - |
-| VibeVoice-Realtime | ✅ | 0.5B | - | - | 2.05 | 63.3 | - | - |
-| HiggsAudio-v2 | ✅ | 3B | 1.50 | 74.0 | 2.44 | 67.7 | - | - |
-| VoxCPM | ✅ | 0.5B | 0.93 | 77.2 | 1.85 | 72.9 | 8.87 | 73.0 |
-| GLM-TTS | ✅ | 1.5B | 1.03 | 76.1 | - | - | - | - |
-| GLM-TTS RL | ✅ | 1.5B | 0.89 | 76.4 | - | - | - | - |
-| Fun-CosyVoice3-0.5B-2512 | ✅ | 0.5B | 1.21 | 78.0 | 2.24 | 71.8 | 6.71 | 75.8 |
-| Fun-CosyVoice3-0.5B-2512_RL | ✅ | 0.5B | 0.81 | 77.4 | 1.68 | 69.5 | 5.44 | 75.0 |
-
-
-## Install
-
-### Clone and install
-
-- Clone the repo
-    ``` sh
-    git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git
-    # If you failed to clone the submodule due to network failures, please run the following command until success
-    cd CosyVoice
-    git submodule update --init --recursive
-    ```
-
-- Install Conda: please see https://docs.conda.io/en/latest/miniconda.html
-- Create Conda env:
-
-    ``` sh
-    conda create -n cosyvoice -y python=3.10
-    conda activate cosyvoice
-    pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com
-
-    # If you encounter sox compatibility issues
-    # ubuntu
-    sudo apt-get install sox libsox-dev
-    # centos
-    sudo yum install sox sox-devel
-    ```
-
-### Model download
-
-We strongly recommend that you download our pretrained `Fun-CosyVoice3-0.5B` `CosyVoice2-0.5B` `CosyVoice-300M` `CosyVoice-300M-SFT` `CosyVoice-300M-Instruct` model and `CosyVoice-ttsfrd` resource.
-
-``` python
-# modelscope SDK model download
-from modelscope import snapshot_download
-snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='pretrained_models/Fun-CosyVoice3-0.5B')
-snapshot_download('iic/CosyVoice2-0.5B', local_dir='pretrained_models/CosyVoice2-0.5B')
-snapshot_download('iic/CosyVoice-300M', local_dir='pretrained_models/CosyVoice-300M')
-snapshot_download('iic/CosyVoice-300M-SFT', local_dir='pretrained_models/CosyVoice-300M-SFT')
-snapshot_download('iic/CosyVoice-300M-Instruct', local_dir='pretrained_models/CosyVoice-300M-Instruct')
-snapshot_download('iic/CosyVoice-ttsfrd', local_dir='pretrained_models/CosyVoice-ttsfrd')
-
-# for oversea users, huggingface SDK model download
-from huggingface_hub import snapshot_download
-snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='pretrained_models/Fun-CosyVoice3-0.5B')
-snapshot_download('FunAudioLLM/CosyVoice2-0.5B', local_dir='pretrained_models/CosyVoice2-0.5B')
-snapshot_download('FunAudioLLM/CosyVoice-300M', local_dir='pretrained_models/CosyVoice-300M')
-snapshot_download('FunAudioLLM/CosyVoice-300M-SFT', local_dir='pretrained_models/CosyVoice-300M-SFT')
-snapshot_download('FunAudioLLM/CosyVoice-300M-Instruct', local_dir='pretrained_models/CosyVoice-300M-Instruct')
-snapshot_download('FunAudioLLM/CosyVoice-ttsfrd', local_dir='pretrained_models/CosyVoice-ttsfrd')
-```
-
-Optionally, you can unzip `ttsfrd` resource and install `ttsfrd` package for better text normalization performance.
-
-Notice that this step is not necessary. If you do not install `ttsfrd` package, we will use wetext by default.
-
-``` sh
-cd pretrained_models/CosyVoice-ttsfrd/
-unzip resource.zip -d .
-pip install ttsfrd_dependency-0.1-py3-none-any.whl
-pip install ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl
-```
-
-### Basic Usage
-
-We strongly recommend using `Fun-CosyVoice3-0.5B` for better performance.
-Follow the code in `example.py` for detailed usage of each model.
-```sh
-python example.py
-```
-
-#### vLLM Usage
-CosyVoice2/3 now supports **vLLM 0.11.x+ (V1 engine)** and **vLLM 0.9.0 (legacy)**.
-Older vllm version(<0.9.0) do not support CosyVoice inference, and versions in between (e.g., 0.10.x) are not tested.
-
-Notice that `vllm` has a lot of specific requirements. You can create a new env to in case your hardward do not support vllm and old env is corrupted.
-
-``` sh
-conda create -n cosyvoice_vllm --clone cosyvoice
-conda activate cosyvoice_vllm
-# for vllm==0.9.0
-pip install vllm==v0.9.0 transformers==4.51.3 numpy==1.26.4 -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com
-# for vllm>=0.11.0
-pip install vllm==v0.11.0 transformers==4.57.1 numpy==1.26.4 -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com
-python vllm_example.py
-```
-
-#### Start web demo
-
-You can use our web demo page to get familiar with CosyVoice quickly.
-
-Please see the demo website for details.
-
-``` python
-# change iic/CosyVoice-300M-SFT for sft inference, or iic/CosyVoice-300M-Instruct for instruct inference
-python3 webui.py --port 50000 --model_dir pretrained_models/CosyVoice-300M
-```
-
-#### Advanced Usage
-
-For advanced users, we have provided training and inference scripts in `examples/libritts`.
-
-#### Build for deployment
-
-Optionally, if you want service deployment,
-You can run the following steps.
-
-``` sh
-cd runtime/python
-docker build -t cosyvoice:v1.0 .
-# change iic/CosyVoice-300M to iic/CosyVoice-300M-Instruct if you want to use instruct inference
-# for grpc usage
-docker run -d --runtime=nvidia -p 50000:50000 cosyvoice:v1.0 /bin/bash -c "cd /opt/CosyVoice/CosyVoice/runtime/python/grpc && python3 server.py --port 50000 --max_conc 4 --model_dir iic/CosyVoice-300M && sleep infinity"
-cd grpc && python3 client.py --port 50000 --mode <sft|zero_shot|cross_lingual|instruct>
-# for fastapi usage
-docker run -d --runtime=nvidia -p 50000:50000 cosyvoice:v1.0 /bin/bash -c "cd /opt/CosyVoice/CosyVoice/runtime/python/fastapi && python3 server.py --port 50000 --model_dir iic/CosyVoice-300M && sleep infinity"
-cd fastapi && python3 client.py --port 50000 --mode <sft|zero_shot|cross_lingual|instruct>
-```
-
-#### Using Nvidia TensorRT-LLM for deployment
-
-Using TensorRT-LLM to accelerate cosyvoice2 llm could give 4x acceleration comparing with huggingface transformers implementation.
-To quick start:
-
-``` sh
-cd runtime/triton_trtllm
-docker compose up -d
-```
-For more details, you could check [here](https://github.com/FunAudioLLM/CosyVoice/tree/main/runtime/triton_trtllm)
-
-## Discussion & Communication
-
-You can directly discuss on [Github Issues](https://github.com/FunAudioLLM/CosyVoice/issues).
-
-You can also scan the QR code to join our official Dingding chat group.
-
-<img src="./asset/dingding.png" width="250px">
-
-## Acknowledge
-
-1. We borrowed a lot of code from [FunASR](https://github.com/modelscope/FunASR).
-2. We borrowed a lot of code from [FunCodec](https://github.com/modelscope/FunCodec).
-3. We borrowed a lot of code from [Matcha-TTS](https://github.com/shivammehta25/Matcha-TTS).
-4. We borrowed a lot of code from [AcademiCodec](https://github.com/yangdongchao/AcademiCodec).
-5. We borrowed a lot of code from [WeNet](https://github.com/wenet-e2e/wenet).
-
-## Citations
-
-``` bibtex
-@article{du2024cosyvoice,
-  title={Cosyvoice: A scalable multilingual zero-shot text-to-speech synthesizer based on supervised semantic tokens},
-  author={Du, Zhihao and Chen, Qian and Zhang, Shiliang and Hu, Kai and Lu, Heng and Yang, Yexin and Hu, Hangrui and Zheng, Siqi and Gu, Yue and Ma, Ziyang and others},
-  journal={arXiv preprint arXiv:2407.05407},
-  year={2024}
-}
-
-@article{du2024cosyvoice,
-  title={Cosyvoice 2: Scalable streaming speech synthesis with large language models},
-  author={Du, Zhihao and Wang, Yuxuan and Chen, Qian and Shi, Xian and Lv, Xiang and Zhao, Tianyu and Gao, Zhifu and Yang, Yexin and Gao, Changfeng and Wang, Hui and others},
-  journal={arXiv preprint arXiv:2412.10117},
-  year={2024}
-}
-
-@article{du2025cosyvoice,
-  title={CosyVoice 3: Towards In-the-wild Speech Generation via Scaling-up and Post-training},
-  author={Du, Zhihao and Gao, Changfeng and Wang, Yuxuan and Yu, Fan and Zhao, Tianyu and Wang, Hao and Lv, Xiang and Wang, Hui and Shi, Xian and An, Keyu and others},
-  journal={arXiv preprint arXiv:2505.17589},
-  year={2025}
-}
-
-@inproceedings{lyu2025build,
-  title={Build LLM-Based Zero-Shot Streaming TTS System with Cosyvoice},
-  author={Lyu, Xiang and Wang, Yuxuan and Zhao, Tianyu and Wang, Hao and Liu, Huadai and Du, Zhihao},
-  booktitle={ICASSP 2025-2025 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
-  pages={1--2},
-  year={2025},
-  organization={IEEE}
-}
-```
-
-## Disclaimer
-The content provided above is for academic purposes only and is intended to demonstrate technical capabilities. Some examples are sourced from the internet. If any content infringes on your rights, please contact us to request its removal.
+代码与模型能力大量来自 [FunAudioLLM/CosyVoice](https://github.com/FunAudioLLM/CosyVoice)。引用格式见 **`README_raw.md`** 文末 BibTeX。
