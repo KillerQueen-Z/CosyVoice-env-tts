@@ -213,17 +213,46 @@ def save_model(model, model_name, info_dict):
             fout.write(data)
         logging.info('[Rank {}] Checkpoint: save to checkpoint {}'.format(rank, save_model_path))
 
+        # 限制最多保留的 epoch_* checkpoint 数量（init.pt 始终保留）
+        max_keep_ckpt = info_dict.get('max_keep_ckpt', -1)
+        if isinstance(max_keep_ckpt, int) and max_keep_ckpt > 0:
+            ckpt_files = [
+                f for f in os.listdir(model_dir)
+                if f.startswith('epoch_') and f.endswith('.pt')
+            ]
+            if len(ckpt_files) > max_keep_ckpt:
+                # 按文件名排序，默认 epoch_0 < epoch_1 < ...
+                ckpt_files.sort()
+                num_to_remove = len(ckpt_files) - max_keep_ckpt
+                for old_ckpt in ckpt_files[:num_to_remove]:
+                    old_ckpt_path = os.path.join(model_dir, old_ckpt)
+                    try:
+                        os.remove(old_ckpt_path)
+                    except OSError:
+                        pass
+                    # 同时删除对应的 yaml 信息文件
+                    old_info_path = re.sub('.pt$', '.yaml', old_ckpt_path)
+                    if os.path.exists(old_info_path):
+                        try:
+                            os.remove(old_info_path)
+                        except OSError:
+                            pass
+
 
 def cosyvoice_join(group_join, info_dict):
     world_size = int(os.environ.get('WORLD_SIZE', 1))
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     rank = int(os.environ.get('RANK', 0))
 
+    # 单卡或单进程训练时不需要 join 逻辑，直接跳过
+    if world_size <= 1:
+        return False
+
     if info_dict["batch_idx"] != 0:
         # we try to join all rank in both ddp and deepspeed mode, in case different rank has different lr
         try:
-            dist.monitored_barrier(group=group_join,
-                                   timeout=group_join.options._timeout)
+            # 兼容不同 torch 版本：直接使用默认 timeout，避免依赖 group_join.options
+            dist.monitored_barrier(group=group_join)
             return False
         except RuntimeError as e:
             logging.info("Detected uneven workload distribution: {}\n".format(e) +

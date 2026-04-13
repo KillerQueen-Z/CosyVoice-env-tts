@@ -47,6 +47,10 @@ compile_commands.json
 *.aac
 *.pt
 pretrained_models/*
+# 勿提交安装包 / 训练日志 / 本机预训练目录符号链接
+/miniconda.sh
+/train_env_instruct.log
+/pretrained_models
 *_pb2_grpc.py
 *_pb2.py
 *.tar
