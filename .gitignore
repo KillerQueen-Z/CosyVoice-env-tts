@@ -55,6 +55,22 @@ pretrained_models/*
 *_pb2.py
 *.tar
 
-# env_instruct_pipeline: 生成的数据与下载的数据集不推送
+# env_instruct_pipeline: 生成的数据与下载的数据集不推送(含符号链接)
+env_instruct_pipeline/output
 env_instruct_pipeline/output/
+env_instruct_pipeline/datasets
 env_instruct_pipeline/datasets/
+
+# Plan B 实验运行时状态 + 日志
+logs/
+.train_pid
+.train_queue_pid
+.gen_pid
+.gen_30k_pid
+.download_pid
+.untar_pid
+.nr_pid
+
+# 可重生成的 manifest / 测试输出
+rt60_manifest.json
+neural_reverb_out/

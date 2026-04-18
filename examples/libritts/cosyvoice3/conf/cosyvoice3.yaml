@@ -45,7 +45,7 @@ flow: !new:cosyvoice.flow.flow.CausalMaskedDiffWithDiT
     only_mask_loss: True
     token_mel_ratio: !ref <token_mel_ratio>
     pre_lookahead_len: 3
-    instruct_cond: True         # Plan B: Flow 直接接收 instruct 条件
+    instruct_cond: False         # Plan B: Flow 直接接收 instruct 条件
     instruct_vocab_size: 152064
     instruct_embed_dim: 128
     pre_lookahead_layer: !new:cosyvoice.transformer.upsample_encoder.PreLookaheadLayer
@@ -200,20 +200,21 @@ data_pipeline_gan: [
 ]
 
 # llm flow train conf
+# 狠狠训 LLM 模式:lr=5e-6(中间值)+ 25 epoch + 每轮存
 train_conf:
     optim: adam
     optim_conf:
-        lr: 1e-6 # 小数据微调降到 1e-6,避免过拟合
+        lr: 5e-6
     scheduler: warmuplr
     scheduler_conf:
-        warmup_steps: 500
-    max_epoch: 15
-    grad_clip: 5.0
+        warmup_steps: 1500   # 大数据 warmup 长一些
+    max_epoch: 25
+    grad_clip: 1.0   # LLM 用紧裁剪防过拟合
     accum_grad: 4
     log_interval: 100
     save_per_step: -1
-    save_per_epoch: 1   # 每轮都存,事后挑 CV loss 最低的
-    max_keep_ckpt: 15
+    save_per_epoch: 1
+    max_keep_ckpt: 25
 
 # gan train conf
 train_conf_gan:
