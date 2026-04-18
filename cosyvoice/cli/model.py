@@ -65,7 +65,19 @@ class CosyVoiceModel:
     def load(self, llm_model, flow_model, hift_model):
         self.llm.load_state_dict(torch.load(llm_model, map_location=self.device, weights_only=True), strict=True)
         self.llm.to(self.device).eval()
-        self.flow.load_state_dict(torch.load(flow_model, map_location=self.device, weights_only=True), strict=True)
+        # Plan B: Flow 新增了 instruct_embedding / instruct_proj,base flow.pt 里没有,
+        # 用 strict=False 容忍 missing;把 instruct_proj 清零让 bias=0(等价于未用 Plan B)
+        flow_sd = torch.load(flow_model, map_location=self.device, weights_only=True)
+        missing, unexpected = self.flow.load_state_dict(flow_sd, strict=False)
+        # 缺 instruct FiLM 层 → 清零(h * 1 + 0 = h,等价于禁用 Plan B)
+        if missing:
+            with torch.no_grad():
+                for name in ('instruct_proj_gamma', 'instruct_proj_beta'):
+                    if hasattr(self.flow, name) and any(name in k for k in missing):
+                        m = getattr(self.flow, name)
+                        m.weight.zero_(); m.bias.zero_()
+        if unexpected:
+            raise RuntimeError(f'unexpected keys in flow: {unexpected[:3]}')
         self.flow.to(self.device).eval()
         # in case hift_model is a hifigan model
         hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(hift_model, map_location=self.device, weights_only=True).items()}
@@ -335,6 +347,9 @@ class CosyVoice2Model(CosyVoiceModel):
         with self.lock:
             self.tts_speech_token_dict[this_uuid], self.llm_end_dict[this_uuid] = [], False
             self.hift_cache_dict[this_uuid] = None
+        # Plan B: instruct_token 透传给 token2wav → flow
+        instruct_token = kwargs.get('instruct_token')
+        instruct_token_len = kwargs.get('instruct_token_len')
         if source_speech_token.shape[1] == 0:
             p = threading.Thread(target=self.llm_job, args=(text, prompt_text, llm_prompt_speech_token, llm_embedding, this_uuid))
         else:
@@ -355,7 +370,9 @@ class CosyVoice2Model(CosyVoiceModel):
                                                      token_offset=token_offset,
                                                      uuid=this_uuid,
                                                      stream=stream,
-                                                     finalize=False)
+                                                     finalize=False,
+                                                     instruct_token=instruct_token,
+                                                     instruct_token_len=instruct_token_len)
                     token_offset += this_token_hop_len
                     self.token_hop_len = min(self.token_max_hop_len, self.token_hop_len * self.stream_scale_factor)
                     yield {'tts_speech': this_tts_speech.cpu()}
@@ -370,7 +387,9 @@ class CosyVoice2Model(CosyVoiceModel):
                                              embedding=flow_embedding,
                                              token_offset=token_offset,
                                              uuid=this_uuid,
-                                             finalize=True)
+                                             finalize=True,
+                                             instruct_token=instruct_token,
+                                             instruct_token_len=instruct_token_len)
             yield {'tts_speech': this_tts_speech.cpu()}
         else:
             # deal with all tokens
@@ -383,7 +402,9 @@ class CosyVoice2Model(CosyVoiceModel):
                                              token_offset=0,
                                              uuid=this_uuid,
                                              finalize=True,
-                                             speed=speed)
+                                             speed=speed,
+                                             instruct_token=instruct_token,
+                                             instruct_token_len=instruct_token_len)
             yield {'tts_speech': this_tts_speech.cpu()}
         with self.lock:
             self.tts_speech_token_dict.pop(this_uuid)
@@ -422,7 +443,8 @@ class CosyVoice3Model(CosyVoice2Model):
         # FSQ silent and breath token
         self.silent_tokens = [1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323]
 
-    def token2wav(self, token, prompt_token, prompt_feat, embedding, token_offset, uuid, stream=False, finalize=False, speed=1.0):
+    def token2wav(self, token, prompt_token, prompt_feat, embedding, token_offset, uuid, stream=False, finalize=False, speed=1.0,
+                  instruct_token=None, instruct_token_len=None):
         with torch.cuda.amp.autocast(self.fp16):
             tts_mel, _ = self.flow.inference(token=token.to(self.device, dtype=torch.int32),
                                              token_len=torch.tensor([token.shape[1]], dtype=torch.int32).to(self.device),
@@ -432,7 +454,9 @@ class CosyVoice3Model(CosyVoice2Model):
                                              prompt_feat_len=torch.tensor([prompt_feat.shape[1]], dtype=torch.int32).to(self.device),
                                              embedding=embedding.to(self.device),
                                              streaming=stream,
-                                             finalize=finalize)
+                                             finalize=finalize,
+                                             instruct_token=instruct_token,
+                                             instruct_token_len=instruct_token_len)
             tts_mel = tts_mel[:, :, token_offset * self.flow.token_mel_ratio:]
             # append mel cache
             if self.hift_cache_dict[uuid] is not None:

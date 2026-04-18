@@ -210,6 +210,10 @@ class CosyVoiceFrontEnd:
         model_input = self.frontend_zero_shot(tts_text, instruct_text, prompt_wav, resample_rate, zero_shot_spk_id)
         del model_input['llm_prompt_speech_token']
         del model_input['llm_prompt_speech_token_len']
+        # Plan B: 把 instruct 文本 tokenize 一份给 Flow 用(不经过 LLM 的 prompt_text 路径)
+        instruct_tok, instruct_tok_len = self._extract_text_token(instruct_text)
+        model_input['instruct_token'] = instruct_tok
+        model_input['instruct_token_len'] = instruct_tok_len
         return model_input
 
     def frontend_vc(self, source_speech_16k, prompt_wav, resample_rate):

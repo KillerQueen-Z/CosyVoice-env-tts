@@ -45,6 +45,9 @@ flow: !new:cosyvoice.flow.flow.CausalMaskedDiffWithDiT
     only_mask_loss: True
     token_mel_ratio: !ref <token_mel_ratio>
     pre_lookahead_len: 3
+    instruct_cond: True         # Plan B: Flow 直接接收 instruct 条件
+    instruct_vocab_size: 152064
+    instruct_embed_dim: 128
     pre_lookahead_layer: !new:cosyvoice.transformer.upsample_encoder.PreLookaheadLayer
         in_channels: 80
         channels: 1024
@@ -200,30 +203,32 @@ data_pipeline_gan: [
 train_conf:
     optim: adam
     optim_conf:
-        lr: 1e-5 # change to 1e-5 during sft
-    scheduler: constantlr # change to constantlr during sft
+        lr: 1e-6 # 小数据微调降到 1e-6,避免过拟合
+    scheduler: warmuplr
     scheduler_conf:
-        warmup_steps: 2500
-    max_epoch: 30
-    grad_clip: 5
+        warmup_steps: 500
+    max_epoch: 15
+    grad_clip: 5.0
     accum_grad: 4
     log_interval: 100
     save_per_step: -1
-    max_keep_ckpt: 3
+    save_per_epoch: 1   # 每轮都存,事后挑 CV loss 最低的
+    max_keep_ckpt: 15
 
 # gan train conf
 train_conf_gan:
     optim: adam
     optim_conf:
-        lr: 0.0002 # use small lr for gan training
+        lr: 0.0002
     scheduler: constantlr
     optim_d: adam
     optim_conf_d:
-        lr: 0.0002 # use small lr for gan training
+        lr: 0.0002
     scheduler_d: constantlr
-    max_epoch: 30
+    max_epoch: 10
     grad_clip: 5
     accum_grad: 1 # in gan training, accum_grad must be 1
     log_interval: 100
     save_per_step: -1
-    max_keep_ckpt: 3
+    save_per_epoch: 1
+    max_keep_ckpt: 10

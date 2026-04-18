@@ -26,9 +26,15 @@ import torch
 def job(utt_list, parquet_file, utt2parquet_file, spk2parquet_file):
     start_time = time.time()
     data_list = []
+    clean_list = []
     for utt in tqdm(utt_list):
         data = open(utt2wav[utt], 'rb').read()
         data_list.append(data)
+        # Plan B: 如果有 clean 版本(干声),一起打包进 parquet
+        if utt2wav_clean is not None and utt in utt2wav_clean:
+            clean_list.append(open(utt2wav_clean[utt], 'rb').read())
+        else:
+            clean_list.append(None)
 
     # 保存到parquet,utt2parquet_file,spk2parquet_file
     df = pd.DataFrame()
@@ -37,6 +43,8 @@ def job(utt_list, parquet_file, utt2parquet_file, spk2parquet_file):
     df['wav'] = [utt2wav[utt] for utt in utt_list]
     df['text'] = [utt2text[utt] for utt in utt_list]
     df['spk'] = [utt2spk[utt] for utt in utt_list]
+    if any(x is not None for x in clean_list):
+        df['audio_data_clean'] = clean_list
     if utt2embedding is not None:
         df['utt_embedding'] = [utt2embedding[utt] for utt in utt_list]
     if spk2embedding is not None:
@@ -76,6 +84,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     utt2wav, utt2text, utt2spk = {}, {}, {}
+    utt2wav_clean = None
+    clean_scp = '{}/wav.clean.scp'.format(args.src_dir)
+    if os.path.exists(clean_scp):
+        utt2wav_clean = {}
+        with open(clean_scp) as f:
+            for l in f:
+                l = l.replace('\n', '').split()
+                utt2wav_clean[l[0]] = l[1]
+        print(f'[parquet] using clean wavs from {clean_scp} ({len(utt2wav_clean)} utts)')
     with open('{}/wav.scp'.format(args.src_dir)) as f:
         for l in f:
             l = l.replace('\n', '').split()

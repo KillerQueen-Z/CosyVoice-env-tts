@@ -108,12 +108,34 @@ def wrap_cuda_model(args, model):
     return model
 
 
+def _split_param_groups(model, base_lr):
+    """把 Plan B 的新 instruct_* 参数挑出来给更高 lr(从 0 开始训的新参数不能和预训主体用同 lr)"""
+    new_params, base_params = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if 'instruct_embedding' in n or 'instruct_proj' in n:
+            new_params.append(p)
+        else:
+            base_params.append(p)
+    if new_params:
+        logging.info(f"[optim] Plan B instruct_* 参数 {len(new_params)} 个用 lr={base_lr*100} (100× base lr)")
+        return [
+            {'params': base_params, 'lr': base_lr},
+            {'params': new_params, 'lr': base_lr * 100},
+        ]
+    return model.parameters()
+
+
 def init_optimizer_and_scheduler(args, configs, model, gan):
     if gan is False:
+        base_lr = configs['train_conf']['optim_conf']['lr']
+        param_groups = _split_param_groups(model, base_lr)
+        optim_conf_no_lr = {k: v for k, v in configs['train_conf']['optim_conf'].items() if k != 'lr'}
         if configs['train_conf']['optim'] == 'adam':
-            optimizer = optim.Adam(model.parameters(), **configs['train_conf']['optim_conf'])
+            optimizer = optim.Adam(param_groups, lr=base_lr, **optim_conf_no_lr)
         elif configs['train_conf']['optim'] == 'adamw':
-            optimizer = optim.AdamW(model.parameters(), **configs['train_conf']['optim_conf'])
+            optimizer = optim.AdamW(param_groups, lr=base_lr, **optim_conf_no_lr)
         else:
             raise ValueError("unknown optimizer: " + configs['train_conf'])
 

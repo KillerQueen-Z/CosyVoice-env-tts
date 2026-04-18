@@ -74,8 +74,15 @@ if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
     exit 1
   fi
 
-  for model in llm flow hifigan; do
-    model_dir="$REPO_ROOT/exp/env_instruct_room/$model/$train_engine"
+  # 训练输出放到外挂盘（与 base_model 同级目录），避免系统盘写满
+  # EXP_TAG 用于区分不同实验（例如 _zh / _en / _both）
+  EXP_TAG="${EXP_TAG:-}"
+  EXP_ROOT="${EXP_ROOT:-/media/volume/geo3/exp/env_instruct_room${EXP_TAG}}"
+  mkdir -p "$EXP_ROOT"
+  # MODELS 环境变量:指定要训哪些子模型,默认全套
+  MODELS_TO_TRAIN="${MODELS:-llm flow hifigan}"
+  for model in $MODELS_TO_TRAIN; do
+    model_dir="$EXP_ROOT/$model/$train_engine"
     echo "  --- $model ---"
     torchrun --nnodes=1 --nproc_per_node="$num_gpus" \
       --rdzv_id=$job_id --rdzv_backend=c10d --rdzv_endpoint=localhost:1234 \
@@ -97,7 +104,7 @@ if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
       --use_amp
   done
 
-  echo "训练完成。模型保存在: $REPO_ROOT/exp/env_instruct_room/"
+  echo "训练完成。模型保存在: $EXP_ROOT/"
 fi
 
 echo "Done."

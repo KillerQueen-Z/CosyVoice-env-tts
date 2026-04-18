@@ -173,4 +173,14 @@ class Executor:
         info_dict['loss_dict'] = total_loss_dict
         log_per_save(writer, info_dict)
         model_name = 'epoch_{}_whole'.format(self.epoch) if on_batch_end else 'epoch_{}_step_{}'.format(self.epoch, self.step + 1)
-        save_model(model, model_name, info_dict)
+        # 仅在 on_batch_end（整轮结束）时应用 save_per_epoch 节流；step 级保存保持原逻辑
+        should_save = True
+        if on_batch_end:
+            save_per_epoch = info_dict.get('save_per_epoch', 1) or 1
+            max_epoch = info_dict.get('max_epoch', self.epoch + 1)
+            is_last_epoch = (self.epoch + 1) >= max_epoch
+            if save_per_epoch > 1 and not is_last_epoch and ((self.epoch + 1) % save_per_epoch != 0):
+                should_save = False
+                logging.info('[Rank {}] skip save at epoch {} (save_per_epoch={})'.format(self.rank, self.epoch, save_per_epoch))
+        if should_save:
+            save_model(model, model_name, info_dict)

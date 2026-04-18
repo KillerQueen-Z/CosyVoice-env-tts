@@ -84,6 +84,14 @@ def filter(data,
         sample['speech'], sample['sample_rate'] = torchaudio.load(BytesIO(sample['audio_data']))
         sample['speech'] = sample['speech'].mean(dim=0, keepdim=True)
         del sample['audio_data']
+        # Plan B: 如果 parquet 带了 clean 版本,解成 speech_clean(用于 whisper_feat → token 提取)
+        if 'audio_data_clean' in sample and sample['audio_data_clean'] is not None:
+            try:
+                sc, _ = torchaudio.load(BytesIO(sample['audio_data_clean']))
+                sample['speech_clean'] = sc.mean(dim=0, keepdim=True)
+            except Exception:
+                pass
+            del sample['audio_data_clean']
         # sample['wav'] is torch.Tensor, we have 100 frames every second
         num_frames = sample['speech'].size(1) / sample['sample_rate'] * 100
         if num_frames < min_length:
@@ -126,11 +134,26 @@ def resample(data, resample_rate=22050, min_sample_rate=16000, mode='train'):
             if sample_rate < min_sample_rate:
                 continue
             sample['sample_rate'] = resample_rate
-            sample['speech'] = torchaudio.transforms.Resample(
-                orig_freq=sample_rate, new_freq=resample_rate)(waveform)
+            resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=resample_rate)
+            sample['speech'] = resampler(waveform)
+            # Plan B: speech_clean 也 resample
+            if 'speech_clean' in sample:
+                sample['speech_clean'] = resampler(sample['speech_clean'])
         max_val = sample['speech'].abs().max()
         if max_val > 1:
             sample['speech'] /= max_val
+        if 'speech_clean' in sample:
+            cv = sample['speech_clean'].abs().max()
+            if cv > 1:
+                sample['speech_clean'] /= cv
+            # 关键:对齐 speech_clean 长度到 speech(reverb),避免后续 token/mel 长度不一致
+            if sample['speech_clean'].shape[1] != sample['speech'].shape[1]:
+                L = sample['speech'].shape[1]
+                if sample['speech_clean'].shape[1] > L:
+                    sample['speech_clean'] = sample['speech_clean'][:, :L]
+                else:
+                    pad = L - sample['speech_clean'].shape[1]
+                    sample['speech_clean'] = torch.nn.functional.pad(sample['speech_clean'], (0, pad))
         yield sample
 
 
@@ -158,11 +181,13 @@ def truncate(data, truncate_length=24576, mode='train'):
 def compute_fbank(data,
                   feat_extractor,
                   num_frames=-1,
+                  token_mel_ratio=2,
                   mode='train'):
     """ Extract fbank
 
         Args:
             data: Iterable[{key, wav, label, sample_rate}]
+            token_mel_ratio: 0 表示 GAN (hifigan) 训练,跳过对齐;>0 用于 llm/flow
 
         Returns:
             Iterable[{key, feat, label}]
@@ -171,11 +196,22 @@ def compute_fbank(data,
         assert 'sample_rate' in sample
         assert 'speech' in sample
         assert 'utt' in sample
-        assert 'text_token' in sample
+        # GAN(hifigan)训练不需要 text_token 对齐
+        if token_mel_ratio != 0:
+            assert 'text_token' in sample
         # NOTE in cosyvoice2/3, we support online token extraction, so we need to align speech to 25hz first
-        if num_frames != -1:
+        if num_frames != -1 and token_mel_ratio != 0:
             index = int(np.ceil(sample['speech'].shape[1] / num_frames))
-            sample['speech'] = torch.concat([sample['speech'], torch.zeros(1, index * num_frames - sample['speech'].shape[1])], dim=1)
+            target_len = index * num_frames
+            sample['speech'] = torch.concat([sample['speech'], torch.zeros(1, target_len - sample['speech'].shape[1])], dim=1)
+            # Plan B: speech_clean 也对齐到相同长度,保证下游 token / mel 长度一致
+            if 'speech_clean' in sample:
+                sc = sample['speech_clean']
+                if sc.shape[1] < target_len:
+                    sc = torch.concat([sc, torch.zeros(1, target_len - sc.shape[1])], dim=1)
+                elif sc.shape[1] > target_len:
+                    sc = sc[:, :target_len]
+                sample['speech_clean'] = sc
         sample['speech_feat'] = feat_extractor(sample['speech']).squeeze(dim=0).transpose(0, 1)
         yield sample
 
@@ -192,7 +228,14 @@ def compute_whisper_fbank(data, num_frames=-1, mode='train'):
     for sample in data:
         if num_frames != -1:
             assert sample['speech'].shape[1] % num_frames == 0, 'speech length is not aligned with speech_token'
-        sample['speech_16k'] = torchaudio.transforms.Resample(orig_freq=sample['sample_rate'], new_freq=16000)(sample['speech'])
+        # Plan B: whisper_feat → speech_token,优先用 clean 版本(如果有)
+        # 这样 token 不带混响信息,Flow 被迫从 instruct 学混响
+        src = sample.get('speech_clean', sample['speech'])
+        # 对齐到 reverb 的长度(它们原始应该长度一样,但保险起见裁剪)
+        if src.shape[1] != sample['speech'].shape[1]:
+            L = min(src.shape[1], sample['speech'].shape[1])
+            src = src[:, :L]
+        sample['speech_16k'] = torchaudio.transforms.Resample(orig_freq=sample['sample_rate'], new_freq=16000)(src)
         sample['whisper_feat'] = whisper.log_mel_spectrogram(sample['speech_16k'], n_mels=128).squeeze(dim=0).transpose(0, 1)
         yield sample
 

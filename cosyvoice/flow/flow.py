@@ -298,7 +298,11 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
                                        'cfm_params': DictConfig({'sigma_min': 1e-06, 'solver': 'euler', 't_scheduler': 'cosine',
                                                                  'training_cfg_rate': 0.2, 'inference_cfg_rate': 0.7, 'reg_loss_type': 'l1'}),
                                        'decoder_params': {'channels': [256, 256], 'dropout': 0.0, 'attention_head_dim': 64,
-                                                          'n_blocks': 4, 'num_mid_blocks': 12, 'num_heads': 8, 'act_fn': 'gelu'}}):
+                                                          'n_blocks': 4, 'num_mid_blocks': 12, 'num_heads': 8, 'act_fn': 'gelu'}},
+                 # Plan B: 让 Flow 直接接收 instruct 条件,绕过 LLM 的 token 瓶颈
+                 instruct_cond: bool = False,
+                 instruct_vocab_size: int = 152064,  # Qwen tokenizer vocab
+                 instruct_embed_dim: int = 128):
         super().__init__()
         self.input_size = input_size
         self.output_size = output_size
@@ -314,8 +318,37 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         self.decoder = decoder
         self.only_mask_loss = only_mask_loss
         self.token_mel_ratio = token_mel_ratio
+        # Instruct FiLM + 独立 100× 学习率(见 train_utils._split_param_groups)
+        # scale=1(不放大),init std=0.01(初始扰动极小,保证语音可懂)
+        # 让 100× lr 慢慢把 FiLM 参数推到应有的方向,不破坏已学的 Flow 主体
+        self.instruct_cond = instruct_cond
+        self.film_scale = 5.0
+        if instruct_cond:
+            self.instruct_embedding = nn.Embedding(instruct_vocab_size, instruct_embed_dim)
+            self.instruct_proj_gamma = nn.Linear(instruct_embed_dim, output_size)
+            self.instruct_proj_beta = nn.Linear(instruct_embed_dim, output_size)
+            nn.init.zeros_(self.instruct_proj_gamma.bias)
+            nn.init.zeros_(self.instruct_proj_beta.bias)
+            nn.init.normal_(self.instruct_proj_gamma.weight, std=0.01)
+            nn.init.normal_(self.instruct_proj_beta.weight, std=0.01)
+            logging.info(f"Plan B FiLM: instruct_cond enabled (vocab={instruct_vocab_size}, embed={instruct_embed_dim}, scale={self.film_scale})")
         if online_feature is True:
             self.speech_token_extractor = SpeechTokenExtractor(model_path=os.path.join(onnx_path, 'speech_tokenizer_v3.batch.onnx'))
+
+    def _compute_instruct_film(self, instruct_token, instruct_token_len, device, dtype):
+        """instruct token → mean-pooled embed → gamma/beta 用于 FiLM 调制。
+        返回 (gamma, beta),两者形状 [B, output_size],推荐用法:h = h * (1 + gamma) + beta"""
+        if not self.instruct_cond or instruct_token is None:
+            return None, None
+        instruct_token = instruct_token.to(device)
+        instruct_token_len = instruct_token_len.to(device)
+        emb = self.instruct_embedding(torch.clamp(instruct_token, min=0))  # [B, L, D]
+        L = emb.shape[1]
+        mask = (torch.arange(L, device=device).unsqueeze(0) < instruct_token_len.unsqueeze(1)).float()
+        emb = (emb * mask.unsqueeze(-1)).sum(dim=1) / mask.sum(dim=1, keepdim=True).clamp(min=1)  # [B, D]
+        gamma = self.instruct_proj_gamma(emb).to(dtype)  # [B, output_size]
+        beta = self.instruct_proj_beta(emb).to(dtype)
+        return gamma, beta
 
     def forward(
             self,
@@ -347,14 +380,19 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         h = h.repeat_interleave(self.token_mel_ratio, dim=1)
         mask = mask.repeat_interleave(self.token_mel_ratio, dim=1).squeeze(dim=-1)
 
+        # Plan B FiLM: h = h * (1 + gamma) + beta
+        gamma, beta = self._compute_instruct_film(
+            batch.get('instruct_token'), batch.get('instruct_token_len'), device, h.dtype)
+        if gamma is not None:
+            # film_scale 放大 FiLM 影响,弥补小 lr 下的慢学习
+            g = gamma.unsqueeze(1) * self.film_scale
+            b = beta.unsqueeze(1) * self.film_scale
+            h = h * (1.0 + g) + b
+
         # get conditions
-        conds = torch.zeros(feat.shape, device=token.device)
-        for i, j in enumerate(feat_len):
-            if random.random() < 0.5:
-                continue
-            index = random.randint(0, int(0.3 * j))
-            conds[i, :index] = feat[i, :index]
-        conds = conds.transpose(1, 2)
+        # Plan B: 训练时强制 conds=0,断掉"reverb mel 直接复制到 conds"的泄漏
+        # (原代码 50% 概率把 reverb mel 前 30% 当 conds,Flow 不学 instruct 也能复用)
+        conds = torch.zeros(feat.shape, device=token.device).transpose(1, 2)
 
         loss, _ = self.decoder.compute_loss(
             feat.transpose(1, 2).contiguous(),
@@ -376,7 +414,9 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
                   prompt_feat_len,
                   embedding,
                   streaming,
-                  finalize):
+                  finalize,
+                  instruct_token=None,
+                  instruct_token_len=None):
         assert token.shape[0] == 1
         # xvec projection
         embedding = F.normalize(embedding, dim=1)
@@ -393,6 +433,16 @@ class CausalMaskedDiffWithDiT(torch.nn.Module):
         else:
             h = self.pre_lookahead_layer(token[:, :-self.pre_lookahead_len], context=token[:, -self.pre_lookahead_len:])
         h = h.repeat_interleave(self.token_mel_ratio, dim=1)
+
+        # Plan B FiLM: h = h * (1 + gamma) + beta
+        gamma, beta = self._compute_instruct_film(
+            instruct_token, instruct_token_len, token.device, h.dtype)
+        if gamma is not None:
+            # film_scale 放大 FiLM 影响,弥补小 lr 下的慢学习
+            g = gamma.unsqueeze(1) * self.film_scale
+            b = beta.unsqueeze(1) * self.film_scale
+            h = h * (1.0 + g) + b
+
         mel_len1, mel_len2 = prompt_feat.shape[1], h.shape[1] - prompt_feat.shape[1]
 
         # get conditions
