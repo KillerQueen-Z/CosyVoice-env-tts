@@ -35,6 +35,47 @@ NEURAL_REVERB_CKPT = '/media/volume/geo3/neural_reverb.pt'
 EXP_ROOTS = sorted(glob.glob('/media/volume/geo3/exp/env_instruct_room*'))
 SUBMODELS = ('llm', 'flow', 'hifigan')
 
+# 常见 instruct 预设:选中 → 自动填入 instruct 输入框
+INSTRUCT_PRESETS = [
+    ('—— 自定义 / Custom ——', ''),
+    # —— 混响(中文)——
+    ('[混响-中] 干声录音,无混响', '干声录音，无混响。'),
+    ('[混响-中] 在小房间里说话', '在小房间里说话，混响较轻。'),
+    ('[混响-中] 在中等大小房间内说话', '在中等大小房间内说话，混响适中。'),
+    ('[混响-中] 在大型厅堂内说话', '在大型厅堂内说话，混响较长。'),
+    # —— 混响(英文)——
+    ('[混响-en] Dry recording, no reverb', 'Dry recording, no reverberation.'),
+    ('[混响-en] Small room with light reverb', 'Speaking in a small room with light reverb.'),
+    ('[混响-en] Medium room with moderate reverb', 'Speaking in a medium-sized room with moderate reverb.'),
+    ('[混响-en] Large hall with long reverb', 'Speaking in a large hall with long reverb.'),
+    # —— 情感 ——
+    ('[情感] 请非常开心地说一句话', '请非常开心地说一句话。'),
+    ('[情感] 请非常伤心地说一句话', '请非常伤心地说一句话。'),
+    ('[情感] 请非常生气地说一句话', '请非常生气地说一句话。'),
+    # —— 方言 ——
+    ('[方言] 请用广东话表达', '请用广东话表达。'),
+    ('[方言] 请用四川话表达', '请用四川话表达。'),
+    ('[方言] 请用东北话表达', '请用东北话表达。'),
+    ('[方言] 请用上海话表达', '请用上海话表达。'),
+    # —— 语速 / 音量 ——
+    ('[语速] 请用尽可能慢的语速说', '请用尽可能慢地语速说一句话。'),
+    ('[语速] 请用尽可能快的语速说', '请用尽可能快地语速说一句话。'),
+    ('[音量] Please say loudly', 'Please say a sentence as loudly as possible.'),
+    # —— 角色 ——
+    ('[角色] 小猪佩奇风格', '我想体验一下小猪佩奇风格，可以吗？'),
+    # —— 复合 ——
+    ('[复合] 请用开心的语气在大房间里', '请用开心的语气在一个大的房间里说话。'),
+    ('[复合] 在体育馆里说话', '在体育馆里说话。'),
+    ('[复合] 在地铁站里说话', '在地铁站里说话。'),
+]
+
+
+def apply_preset(preset_value):
+    """选中预设时把原文填入 instruct 框(自定义项对应空串,保留原内容)"""
+    if preset_value is None or preset_value == '':
+        return gr.update()
+    return preset_value
+
 _STATE = {
     'cv': None, 'base_dir': None,
     'ckpts': {sm: None for sm in SUBMODELS},
@@ -178,6 +219,42 @@ def _apply_reverb(audio_np, sr, cls, nr, nr_classes, device, wet_ratio=1.0):
     return mixed.astype(np.float32)
 
 
+def _prepare_prompt_wav(prompt_audio):
+    """把录音 tuple 落盘成 wav 路径;filepath 形式直接返回。"""
+    if isinstance(prompt_audio, tuple):
+        import tempfile, soundfile as sf
+        sr, data = prompt_audio
+        if data.ndim == 2:
+            data = data.mean(axis=1)
+        data = data.astype(np.float32)
+        if np.abs(data).max() > 1.0:
+            data = data / 32768.0
+        tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
+        sf.write(tmp.name, data, sr)
+        return tmp.name
+    return prompt_audio
+
+
+def on_load(llm_choice, flow_choice, hifigan_choice):
+    """显式加载/切换模型,返回状态字符串。"""
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        _load_models(device)
+        cv = _STATE['cv']
+        def _c(x): return None if x in (None, '', '__BASE__') else x
+        _apply_ckpt_choices(cv, _c(llm_choice), _c(flow_choice), _c(hifigan_choice))
+        return (
+            '[OK] 模型已就绪\n'
+            f'  base    : {_STATE["base_dir"]}\n'
+            f'  llm     : {_ckpt_label(_c(llm_choice))}\n'
+            f'  flow    : {_ckpt_label(_c(flow_choice))}\n'
+            f'  hifigan : {_ckpt_label(_c(hifigan_choice))}\n'
+            f'  reverb  : {"loaded" if _STATE["nr"] is not None else "n/a"}'
+        )
+    except Exception as e:
+        return f'[ERROR] {type(e).__name__}: {e}'
+
+
 def synthesize(llm_choice, flow_choice, hifigan_choice,
                tts_text, instruct_text, prompt_audio, speed):
     if not tts_text or not tts_text.strip():
@@ -192,20 +269,7 @@ def synthesize(llm_choice, flow_choice, hifigan_choice,
     llm_ckpt, flow_ckpt, hifigan_ckpt = _c(llm_choice), _c(flow_choice), _c(hifigan_choice)
     _apply_ckpt_choices(cv, llm_ckpt, flow_ckpt, hifigan_ckpt)
 
-    # 录音落盘
-    if isinstance(prompt_audio, tuple):
-        import tempfile, soundfile as sf
-        sr, data = prompt_audio
-        if data.ndim == 2:
-            data = data.mean(axis=1)
-        data = data.astype(np.float32)
-        if np.abs(data).max() > 1.0:
-            data = data / 32768.0
-        tmp = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-        sf.write(tmp.name, data, sr)
-        prompt_wav = tmp.name
-    else:
-        prompt_wav = prompt_audio
+    prompt_wav = _prepare_prompt_wav(prompt_audio)
 
     # 后台:Router → CosyVoice → Neural Reverb(按 epoch 调 wet 比例)
     # ⚠️ 展示逻辑:
@@ -213,6 +277,8 @@ def synthesize(llm_choice, flow_choice, hifigan_choice,
     #   - 选了 fine-tuned LLM → wet 按 LLM epoch 的 sigmoid 曲线
     #     (epoch 0 轻微 → epoch 7 一半 → epoch 15+ 几乎满,像"训练越多 → 混响越强")
     all_base = (llm_ckpt is None and flow_ckpt is None and hifigan_ckpt is None)
+    # 统一走 instruct2:空 instruct 交给 router 兜底一个中性指令
+    # (避免 cross_lingual 在极短输入时触发 conv 越界; 两条路径都靠 prompt_wav 克隆音色)
     ro = router_parse(instruct_text)
     gen = cv.inference_instruct2(tts_text, ro.cosyvoice_instruct, prompt_wav,
                                  stream=False, speed=float(speed))
@@ -231,36 +297,48 @@ def synthesize(llm_choice, flow_choice, hifigan_choice,
 
 I18N = {
     'zh': {
-        'title': '## CosyVoice TTS\n根据文本 + 风格指令合成语音(支持情感、方言、房间混响等)',
+        'title': '# 🎙️ CosyVoice TTS\n根据**文本 + 风格指令**合成语音 · 支持情感、方言、房间混响等',
         'lang': '界面语言 / Language',
         'ckpt_llm': 'LLM checkpoint',
         'ckpt_flow': 'Flow checkpoint',
         'ckpt_hifigan': 'HifiGAN checkpoint',
-        'refresh': '刷新列表',
+        'refresh': '🔄 刷新列表',
+        'load': '📥 加载模型',
+        'status': '状态',
         'tts_text': '合成文本',
         'tts_ph': '例如:今天天气真不错,适合出去散步。',
-        'instruct': '风格指令',
-        'instruct_ph': '例如:请用开心的语气在一个大的房间里说话',
+        'instruct': '风格指令(可留空)',
+        'instruct_ph': '留空 → 中性自然语气;或写:请用开心的语气在一个大的房间里说话',
+        'preset': '常见指令预设(选后自动填入上方)',
         'prompt': '参考音色 wav (3–10 秒)',
         'speed': '语速',
-        'run': '合成',
+        'run': '🎧 合成',
         'result': '合成结果',
+        'section_ckpt': '### 🧩 模型 checkpoint 选择',
+        'section_input': '### 📝 输入',
+        'section_output': '### 🎵 输出',
     },
     'en': {
-        'title': '## CosyVoice TTS\nSynthesize speech from text + style instruction (supports emotion, dialect, room reverb, etc.)',
+        'title': '# 🎙️ CosyVoice TTS\nSynthesize speech from **text + style instruction** — emotion, dialect, room reverb, etc.',
         'lang': '界面语言 / Language',
         'ckpt_llm': 'LLM checkpoint',
         'ckpt_flow': 'Flow checkpoint',
         'ckpt_hifigan': 'HifiGAN checkpoint',
-        'refresh': 'Refresh',
+        'refresh': '🔄 Refresh',
+        'load': '📥 Load model',
+        'status': 'Status',
         'tts_text': 'Text to synthesize',
         'tts_ph': 'e.g. The weather is great today, let\'s go for a walk.',
-        'instruct': 'Style instruction',
-        'instruct_ph': 'e.g. angry and in a large room',
+        'instruct': 'Style instruction (optional)',
+        'instruct_ph': 'Leave empty → neutral natural tone; or: angry and in a large room',
+        'preset': 'Instruction presets (fills above when selected)',
         'prompt': 'Reference voice wav (3–10s)',
         'speed': 'Speed',
-        'run': 'Synthesize',
+        'run': '🎧 Synthesize',
         'result': 'Output',
+        'section_ckpt': '### 🧩 Model checkpoints',
+        'section_input': '### 📝 Input',
+        'section_output': '### 🎵 Output',
     },
 }
 
@@ -269,7 +347,19 @@ def build_ui():
     initial = 'zh'
     t0 = I18N[initial]
 
-    with gr.Blocks(title='CosyVoice TTS Demo') as demo:
+    theme = gr.themes.Soft(
+        primary_hue='indigo',
+        secondary_hue='slate',
+        neutral_hue='slate',
+        font=[gr.themes.GoogleFont('Inter'), 'ui-sans-serif', 'system-ui', 'sans-serif'],
+    )
+    css = """
+    .gradio-container { max-width: 1200px !important; margin: auto !important; }
+    #section-ckpt, #section-input, #section-output { padding: 6px 2px 2px 2px; }
+    .status-box textarea { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+    """
+
+    with gr.Blocks(title='CosyVoice TTS Demo', theme=theme, css=css) as demo:
         title_md = gr.Markdown(t0['title'])
 
         with gr.Row():
@@ -279,37 +369,52 @@ def build_ui():
                 value=initial, scale=1,
             )
             refresh_btn = gr.Button(t0['refresh'], scale=1)
+            load_btn = gr.Button(t0['load'], variant='primary', scale=1)
 
         # 3 个模型 checkpoint 下拉(展示用户能选"我们训的不同模型")
-        with gr.Row():
-            llm_dd = gr.Dropdown(
-                label=t0['ckpt_llm'],
-                choices=_build_choices('llm'),
-                value='__BASE__',
-            )
-            flow_dd = gr.Dropdown(
-                label=t0['ckpt_flow'],
-                choices=_build_choices('flow'),
-                value='__BASE__',
-            )
-            hifigan_dd = gr.Dropdown(
-                label=t0['ckpt_hifigan'],
-                choices=_build_choices('hifigan'),
-                value='__BASE__',
+        section_ckpt_md = gr.Markdown(t0['section_ckpt'], elem_id='section-ckpt')
+        with gr.Group():
+            with gr.Row():
+                llm_dd = gr.Dropdown(
+                    label=t0['ckpt_llm'],
+                    choices=_build_choices('llm'),
+                    value='__BASE__',
+                )
+                flow_dd = gr.Dropdown(
+                    label=t0['ckpt_flow'],
+                    choices=_build_choices('flow'),
+                    value='__BASE__',
+                )
+                hifigan_dd = gr.Dropdown(
+                    label=t0['ckpt_hifigan'],
+                    choices=_build_choices('hifigan'),
+                    value='__BASE__',
+                )
+            status = gr.Textbox(
+                label=t0['status'], interactive=False, lines=5,
+                elem_classes=['status-box'],
             )
 
         with gr.Row():
             with gr.Column(scale=1):
-                tts_text = gr.Textbox(label=t0['tts_text'], placeholder=t0['tts_ph'], lines=3)
-                instruct_text = gr.Textbox(label=t0['instruct'], placeholder=t0['instruct_ph'], lines=2)
-                prompt_audio = gr.Audio(
-                    label=t0['prompt'],
-                    sources=['upload', 'microphone'],
-                    type='filepath',
-                )
-                speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label=t0['speed'])
+                section_input_md = gr.Markdown(t0['section_input'], elem_id='section-input')
+                with gr.Group():
+                    tts_text = gr.Textbox(label=t0['tts_text'], placeholder=t0['tts_ph'], lines=3)
+                    instruct_text = gr.Textbox(label=t0['instruct'], placeholder=t0['instruct_ph'], lines=2)
+                    preset_dd = gr.Dropdown(
+                        label=t0['preset'],
+                        choices=[(label, raw) for label, raw in INSTRUCT_PRESETS],
+                        value='',
+                    )
+                    prompt_audio = gr.Audio(
+                        label=t0['prompt'],
+                        sources=['upload', 'microphone'],
+                        type='filepath',
+                    )
+                    speed = gr.Slider(0.5, 2.0, value=1.0, step=0.05, label=t0['speed'])
                 run_btn = gr.Button(t0['run'], variant='primary', size='lg')
             with gr.Column(scale=1):
+                section_output_md = gr.Markdown(t0['section_output'], elem_id='section-output')
                 out_audio = gr.Audio(label=t0['result'], type='numpy', autoplay=False)
 
         def refresh_all():
@@ -318,6 +423,8 @@ def build_ui():
                     gr.update(choices=_build_choices('hifigan')))
 
         refresh_btn.click(refresh_all, outputs=[llm_dd, flow_dd, hifigan_dd])
+        load_btn.click(on_load, inputs=[llm_dd, flow_dd, hifigan_dd], outputs=status)
+        preset_dd.change(apply_preset, inputs=preset_dd, outputs=instruct_text)
 
         def on_lang(locale):
             t = I18N[locale]
@@ -328,8 +435,14 @@ def build_ui():
                 gr.update(label=t['ckpt_flow']),
                 gr.update(label=t['ckpt_hifigan']),
                 gr.update(value=t['refresh']),
+                gr.update(value=t['load']),
+                gr.update(label=t['status']),
+                gr.update(value=t['section_ckpt']),
+                gr.update(value=t['section_input']),
+                gr.update(value=t['section_output']),
                 gr.update(label=t['tts_text'], placeholder=t['tts_ph']),
                 gr.update(label=t['instruct'], placeholder=t['instruct_ph']),
+                gr.update(label=t['preset']),
                 gr.update(label=t['prompt']),
                 gr.update(label=t['speed']),
                 gr.update(value=t['run']),
@@ -338,8 +451,9 @@ def build_ui():
 
         lang_dd.change(
             on_lang, inputs=lang_dd,
-            outputs=[title_md, lang_dd, llm_dd, flow_dd, hifigan_dd, refresh_btn,
-                     tts_text, instruct_text, prompt_audio, speed, run_btn, out_audio],
+            outputs=[title_md, lang_dd, llm_dd, flow_dd, hifigan_dd, refresh_btn, load_btn,
+                     status, section_ckpt_md, section_input_md, section_output_md,
+                     tts_text, instruct_text, preset_dd, prompt_audio, speed, run_btn, out_audio],
         )
 
         run_btn.click(
