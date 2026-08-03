@@ -8,6 +8,110 @@
 
 ---
 
+## 大盘清理后的完整重建
+
+训练数据、预训练模型和逐 epoch checkpoint 不属于 Git 仓库。释放旧训练盘后，保留仓库代码、实验文档、少量评测输出，以及单独归档的最终模型；其余大文件按本节重新下载或生成。
+
+本次 Jetstream 清理保留的最终 Phase 5 文件位于 `/media/volume/geo2/tts_final_artifacts/`：`neural_reverb.pt`、`reverb_classifier.pt`、`rt60_manifest.json` 及 `SHA256SUMS`。恢复前可在该目录运行 `sha256sum -c SHA256SUMS` 校验。
+
+### 哪些内容可以删除后重建
+
+| 内容 | 是否需要备份 | 重建方式 |
+|------|--------------|----------|
+| `pretrained_models/Fun-CosyVoice3-0.5B` | 否 | 由 ModelScope 或 Hugging Face 重新下载 |
+| LibriTTS `train-clean-100` | 否 | 从 OpenSLR 60 重新下载并解压 |
+| `RIRS_NOISES` | 否 | 从 OpenSLR 28 重新下载并解压 |
+| Kaldi 列表、RT60 manifest | 否 | 使用仓库脚本重新生成 |
+| `env_instruct_output` | 否 | 运行 `run_room_30k.sh` 重新生成 |
+| `exp/**/epoch_*_whole.pt` | 仅备份最终选定模型 | 历史 epoch 不长期保存，需要时重新训练 |
+
+### 1. 指定新的训练盘
+
+不要在脚本里写死旧盘符。为新挂载盘指定一个统一根目录：
+
+```bash
+cd /path/to/CosyVoice-env-tts
+export COSYVOICE_STORAGE_ROOT=/path/to/new-volume/cosyvoice
+mkdir -p "$COSYVOICE_STORAGE_ROOT"/{pretrained_models,speech_data,datasets/env,env_instruct_output,exp}
+```
+
+完整重建和训练建议预留至少 **150 GiB**；若只保留最终 checkpoint，训练结束后可以删除中间 epoch。
+
+### 2. 重建 Python 环境和 base model
+
+```bash
+conda create -n cosyvoice python=3.10 -y
+conda activate cosyvoice
+pip install -r requirements.txt
+
+export PRETRAINED_DIR="$COSYVOICE_STORAGE_ROOT/pretrained_models/Fun-CosyVoice3-0.5B"
+python env_instruct_pipeline/scripts/download_pretrained_cosyvoice3.py \
+  --backend modelscope \
+  --out_dir "$PRETRAINED_DIR"
+```
+
+海外机器可将 `--backend modelscope` 改为 `--backend huggingface`。模型来源为 `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`。
+
+### 3. 重新下载训练数据
+
+```bash
+# OpenSLR 28: RIR + Noise
+curl -L -o "$COSYVOICE_STORAGE_ROOT/datasets/env/rirs_noises.zip" \
+  https://www.openslr.org/resources/28/rirs_noises.zip
+unzip -q "$COSYVOICE_STORAGE_ROOT/datasets/env/rirs_noises.zip" \
+  -d "$COSYVOICE_STORAGE_ROOT/datasets/env"
+
+# OpenSLR 60: LibriTTS train-clean-100
+curl -L -o "$COSYVOICE_STORAGE_ROOT/speech_data/train-clean-100.tar.gz" \
+  https://www.openslr.org/resources/60/train-clean-100.tar.gz
+mkdir -p "$COSYVOICE_STORAGE_ROOT/speech_data/LibriTTS"
+tar -xzf "$COSYVOICE_STORAGE_ROOT/speech_data/train-clean-100.tar.gz" \
+  -C "$COSYVOICE_STORAGE_ROOT/speech_data/LibriTTS"
+```
+
+生成 Kaldi 索引：
+
+```bash
+python env_instruct_pipeline/scripts/prepare_kaldi_libritts.py \
+  --src_dir "$COSYVOICE_STORAGE_ROOT/speech_data/LibriTTS" \
+  --des_dir "$COSYVOICE_STORAGE_ROOT/speech_data/kaldi"
+```
+
+### 4. 重新生成 RT60 manifest 和 30k env-instruct 数据
+
+```bash
+export LIBRITTS_ROOT="$COSYVOICE_STORAGE_ROOT/speech_data/LibriTTS"
+export KALDI_ROOT="$COSYVOICE_STORAGE_ROOT/speech_data/kaldi"
+export RIR_DIR="$COSYVOICE_STORAGE_ROOT/datasets/env/RIRS_NOISES"
+export RIR_MANIFEST="$COSYVOICE_STORAGE_ROOT/rt60_manifest.json"
+export OUT_DIR="$COSYVOICE_STORAGE_ROOT/env_instruct_output/env_instruct_room30k_both"
+
+SPEECH_SAMPLE=$(find "$LIBRITTS_ROOT/train-clean-100" -type f -name '*.wav' | head -n 1)
+python tools/rt60_filter_rirs.py \
+  --rir_dir "$RIR_DIR" \
+  --speech_sample "$SPEECH_SAMPLE" \
+  --out_dir rt60_demo_out \
+  --save_manifest "$RIR_MANIFEST"
+
+bash env_instruct_pipeline/scripts/run_room_30k.sh
+```
+
+### 5. 重新训练
+
+```bash
+export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
+export DATA_ROOT="$OUT_DIR"
+export EXP_ROOT="$COSYVOICE_STORAGE_ROOT/exp/env_instruct_room_both"
+export EXP_TAG=_both
+export PRETRAINED_DIR="$COSYVOICE_STORAGE_ROOT/pretrained_models/Fun-CosyVoice3-0.5B"
+
+bash env_instruct_pipeline/scripts/run_train_room.sh
+```
+
+训练结束后先完成评测并记录最终选定的 LLM/Flow checkpoint，再清理其余 `epoch_*_whole.pt`。不要把大模型或数据提交到 GitHub。
+
+---
+
 ## 仓库结构（与本课题相关）
 
 | 路径 | 说明 |

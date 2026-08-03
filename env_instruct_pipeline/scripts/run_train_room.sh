@@ -14,6 +14,7 @@
 set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
+COSYVOICE_STORAGE_ROOT="${COSYVOICE_STORAGE_ROOT:-$REPO_ROOT/storage}"
 
 # 数据目录（与 run_room_100.sh 输出一致）
 DATA_ROOT="${DATA_ROOT:-env_instruct_pipeline/output/env_instruct_room100}"
@@ -77,7 +78,7 @@ if [ "${stage}" -le 5 ] && [ "${stop_stage}" -ge 5 ]; then
   # 训练输出放到外挂盘（与 base_model 同级目录），避免系统盘写满
   # EXP_TAG 用于区分不同实验（例如 _zh / _en / _both）
   EXP_TAG="${EXP_TAG:-}"
-  EXP_ROOT="${EXP_ROOT:-/media/volume/geo3/exp/env_instruct_room${EXP_TAG}}"
+  EXP_ROOT="${EXP_ROOT:-$COSYVOICE_STORAGE_ROOT/exp/env_instruct_room${EXP_TAG}}"
   mkdir -p "$EXP_ROOT"
   # MODELS 环境变量:指定要训哪些子模型,默认全套
   MODELS_TO_TRAIN="${MODELS:-llm flow hifigan}"

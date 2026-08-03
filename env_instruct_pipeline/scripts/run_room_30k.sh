@@ -1,7 +1,7 @@
 #!/bin/bash
 # 从 train-clean-100 生成 15000 base × 2 (zh/en) = 30000 条 env-instruct 训练数据
 # 依赖:
-#   - LibriTTS train-clean-100 已下载解压到 $LIBRITTS_ROOT (默认 /media/volume/geo3/speech_data/LibriTTS)
+#   - LibriTTS train-clean-100 已下载解压到 $LIBRITTS_ROOT
 #   - RIRS_NOISES 已存在于 $RIR_DIR
 #
 # 输出:
@@ -11,11 +11,12 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
-LIBRITTS_ROOT="${LIBRITTS_ROOT:-/media/volume/geo3/speech_data/LibriTTS}"
-KALDI_ROOT="${KALDI_ROOT:-/media/volume/geo3/speech_data/kaldi}"
-OUT_DIR="${OUT_DIR:-env_instruct_pipeline/output/env_instruct_room30k_both}"
-RIR_DIR="${RIR_DIR:-env_instruct_pipeline/datasets/env/RIRS_NOISES}"
-RIR_MANIFEST="${RIR_MANIFEST:-/media/volume/geo3/rt60_manifest.json}"
+COSYVOICE_STORAGE_ROOT="${COSYVOICE_STORAGE_ROOT:-$REPO_ROOT/storage}"
+LIBRITTS_ROOT="${LIBRITTS_ROOT:-$COSYVOICE_STORAGE_ROOT/speech_data/LibriTTS}"
+KALDI_ROOT="${KALDI_ROOT:-$COSYVOICE_STORAGE_ROOT/speech_data/kaldi}"
+OUT_DIR="${OUT_DIR:-$COSYVOICE_STORAGE_ROOT/env_instruct_output/env_instruct_room30k_both}"
+RIR_DIR="${RIR_DIR:-$COSYVOICE_STORAGE_ROOT/datasets/env/RIRS_NOISES}"
+RIR_MANIFEST="${RIR_MANIFEST:-$COSYVOICE_STORAGE_ROOT/rt60_manifest.json}"
 MAX_TRAIN="${MAX_TRAIN:-15000}"
 MAX_DEV="${MAX_DEV:-1500}"
 TARGET_SR="${TARGET_SR:-24000}"
